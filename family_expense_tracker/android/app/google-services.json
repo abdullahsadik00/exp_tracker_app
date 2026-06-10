@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "977166160493",
+    "firebase_url": "https://family-expense-be584-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "project_id": "family-expense-be584",
+    "storage_bucket": "family-expense-be584.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:977166160493:android:f96f6631df3a2abf692564",
+        "android_client_info": {
+          "package_name": "com.example.family_expense_tracker"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDBOxI_Fu42nozzmU9tlTQOYOb2wvG6Pdo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
