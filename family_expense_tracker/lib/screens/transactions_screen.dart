@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/local_db_service.dart';
 import '../models/transaction_model.dart';
@@ -16,6 +17,7 @@ class TransactionsScreen extends StatefulWidget {
 
 class _TransactionsScreenState extends State<TransactionsScreen> {
   final LocalDbService _localDbService = LocalDbService();
+  late StreamSubscription _dbChangeSubscription;
   late String _selectedFilter;
   int _itemsPerPage = 50;
   int _currentPage = 1;
@@ -34,6 +36,15 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
     super.initState();
     _selectedFilter = widget.initialFilter ?? 'All';
     _loadTransactions();
+    _dbChangeSubscription = _localDbService.onChange.listen((_) {
+      if (mounted) _loadTransactions();
+    });
+  }
+
+  @override
+  void dispose() {
+    _dbChangeSubscription.cancel();
+    super.dispose();
   }
 
   Future<void> _loadTransactions() async {

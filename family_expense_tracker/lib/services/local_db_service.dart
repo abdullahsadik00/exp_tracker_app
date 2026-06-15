@@ -530,6 +530,31 @@ class LocalDbService {
       yield await getAllTransactions();
     }
   }
+
+  Stream<T> _streamOf<T>(Future<T> Function() fetch) async* {
+    yield await fetch();
+    await for (final _ in onChange) {
+      yield await fetch();
+    }
+  }
+
+  Stream<Map<String, double>> get dashboardStatsStream =>
+      _streamOf(getDashboardStatsOptimized);
+
+  Stream<List<TransactionModel>> get unassignedTransactionsStream =>
+      _streamOf(getUnassignedTransactions);
+
+  Stream<List<TransactionModel>> get recentTransactionsStream =>
+      _streamOf(() => getRecentTransactions(limit: 3));
+
+  Stream<List<Map<String, dynamic>>> get budgetProgressStream =>
+      _streamOf(getBudgetProgress);
+
+  Stream<List<String>> get availableMonthsStream =>
+      _streamOf(getAvailableMonths);
+
+  Stream<Map<String, double>> get yearlySpendingTrendStream =>
+      _streamOf(getYearlySpendingTrend);
   
   // Bulk Update Bank
   Future<void> bulkUpdateBank(Set<String> txIds, String newBank) async {

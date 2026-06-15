@@ -37,7 +37,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Fetched $newCount transactions from SMS')),
         );
-        setState(() {}); // Refresh UI
       }
     } catch (e) {
       if (mounted) {
@@ -102,7 +101,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   final content = await file.readAsString();
                   await _localDbService.restoreDatabase(content);
                   if (mounted) {
-                    setState(() {});
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(
                         content: Text('Data restored successfully!'),
@@ -134,7 +132,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 Navigator.push(
                   context,
                   MaterialPageRoute(builder: (context) => const TransactionsScreen(initialFilter: 'Unassigned')),
-                ).then((_) => setState(() {}));
+                );
               }),
               const SizedBox(height: 16),
               _buildInboxSection(),
@@ -147,7 +145,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 Navigator.push(
                   context,
                   MaterialPageRoute(builder: (context) => const TransactionsScreen(initialFilter: 'All')),
-                ).then((_) => setState(() {}));
+                );
               }),
               const SizedBox(height: 16),
               _buildPlaceholderInsight(),
@@ -166,8 +164,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildStatsCarousel() {
-    return FutureBuilder<Map<String, double>>(
-      future: _localDbService.getDashboardStatsOptimized(),
+    return StreamBuilder<Map<String, double>>(
+      stream: _localDbService.dashboardStatsStream,
       builder: (context, snapshot) {
         final stats = snapshot.data ?? {};
         
@@ -337,8 +335,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildInboxSection() {
-    return FutureBuilder<List<TransactionModel>>(
-      future: _localDbService.getUnassignedTransactions(),
+    return StreamBuilder<List<TransactionModel>>(
+      stream: _localDbService.unassignedTransactionsStream,
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting && !snapshot.hasData) {
           return const Center(child: CircularProgressIndicator(color: AppColors.accent));
@@ -466,21 +464,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 child: _buildAssignButton(
                     'Me', () async {
                       await _localDbService.updateTransaction(txn.copyWith(assignedTo: 'Me'));
-                      setState(() {});
                     })),
             const SizedBox(width: 8),
             Expanded(
                 child: _buildAssignButton('Mom',
                     () async {
                       await _localDbService.updateTransaction(txn.copyWith(assignedTo: 'Mom'));
-                      setState(() {});
                     })),
             const SizedBox(width: 8),
             Expanded(
                 child: _buildAssignButton('Dad',
                     () async {
                       await _localDbService.updateTransaction(txn.copyWith(assignedTo: 'Dad'));
-                      setState(() {});
                     })),
           ],
         )
@@ -507,8 +502,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildPlaceholderInsight() {
-    return FutureBuilder<List<TransactionModel>>(
-      future: _localDbService.getRecentTransactions(limit: 3),
+    return StreamBuilder<List<TransactionModel>>(
+      stream: _localDbService.recentTransactionsStream,
       builder: (context, snapshot) {
         if (!snapshot.hasData || (snapshot.data?.isEmpty ?? true)) {
           return Container(
@@ -592,7 +587,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
               if (mounted) {
                 Navigator.pop(ctx);
                 ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('All data cleared!')));
-                setState(() {});
               }
             },
             child: const Text('Delete', style: TextStyle(color: Colors.red)),
@@ -632,8 +626,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildBudgetSection() {
-    return FutureBuilder<List<Map<String, dynamic>>>(
-      future: _localDbService.getBudgetProgress(),
+    return StreamBuilder<List<Map<String, dynamic>>>(
+      stream: _localDbService.budgetProgressStream,
       builder: (context, snapshot) {
         if (!snapshot.hasData || (snapshot.data?.isEmpty ?? true)) {
           return Container(
@@ -794,10 +788,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             TextButton(
               onPressed: () async {
                 await _localDbService.deleteBudget(category);
-                if (mounted) {
-                  setState(() {});
-                  Navigator.pop(ctx);
-                }
+                if (mounted) Navigator.pop(ctx);
               },
               child: const Text('Delete', style: TextStyle(color: Colors.red)),
             ),
@@ -807,10 +798,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               final amount = double.tryParse(amountController.text);
               if (amount != null && amount > 0) {
                 await _localDbService.saveBudget(selectedCategory, amount);
-                if (mounted) {
-                  setState(() {});
-                  Navigator.pop(ctx);
-                }
+                if (mounted) Navigator.pop(ctx);
               }
             },
             style: ElevatedButton.styleFrom(backgroundColor: AppColors.accent),

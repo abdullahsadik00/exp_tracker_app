@@ -34,8 +34,8 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
         backgroundColor: Colors.transparent,
         elevation: 0,
       ),
-      body: FutureBuilder<List<String>>(
-        future: _localDbService.getAvailableMonths(),
+      body: StreamBuilder<List<String>>(
+        stream: _localDbService.availableMonthsStream,
         builder: (context, monthSnapshot) {
           if (monthSnapshot.connectionState == ConnectionState.waiting && !monthSnapshot.hasData) {
             return const Center(child: CircularProgressIndicator(color: AppColors.accent));
@@ -353,8 +353,8 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
   }
 
   Widget _buildYearlyTrendSection() {
-    return FutureBuilder<Map<String, double>>(
-      future: _localDbService.getYearlySpendingTrend(),
+    return StreamBuilder<Map<String, double>>(
+      stream: _localDbService.yearlySpendingTrendStream,
       builder: (context, snapshot) {
         if (!snapshot.hasData) return const SizedBox(height: 200, child: Center(child: CircularProgressIndicator()));
         

@@ -96,7 +96,7 @@ class SmsService {
 
         transactions.add(
           TransactionModel(
-            id: 'sms_${DateTime.now().microsecondsSinceEpoch}',
+            id: 'sms_${message.date?.millisecondsSinceEpoch ?? 0}_${amount.toStringAsFixed(2)}_$type',
             amount: amount,
             bankName: analysis['bankName']!,
             type: type,
