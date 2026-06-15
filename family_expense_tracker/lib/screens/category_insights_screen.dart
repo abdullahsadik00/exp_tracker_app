@@ -40,7 +40,7 @@ class _CategoryInsightsScreenState extends State<CategoryInsightsScreen> {
     if (_selectedCategory == null) return;
 
     final filtered = _allTransactions
-        .where((t) => t.category == _selectedCategory && t.type == 'debit')
+        .where((t) => t.category == _selectedCategory && t.type == 'debit' && t.isTransfer != 1)
         .toList();
 
     // 1. Group by Month (All-Time)

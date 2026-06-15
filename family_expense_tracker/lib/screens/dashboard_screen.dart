@@ -4,6 +4,7 @@ import '../services/local_db_service.dart';
 import '../models/transaction_model.dart';
 import 'add_transaction_screen.dart';
 import 'categorization_rules_screen.dart';
+import 'transfer_review_screen.dart';
 import 'pdf_statement_screen.dart';
 import 'transactions_screen.dart';
 
@@ -641,10 +642,71 @@ class _DashboardScreenState extends State<DashboardScreen> {
       children: [
         _buildSectionHeader('Smart Insights'),
         const SizedBox(height: 16),
+        _buildTransferReviewCard(),
+        const SizedBox(height: 12),
         _buildForecastCard(),
         const SizedBox(height: 12),
         _buildAnomaliesCard(),
       ],
+    );
+  }
+
+  Widget _buildTransferReviewCard() {
+    return StreamBuilder<List<Map<String, dynamic>>>(
+      stream: _localDbService.potentialTransferPairsStream,
+      builder: (context, snapshot) {
+        final count = snapshot.data?.length ?? 0;
+        if (count == 0) return const SizedBox.shrink();
+
+        return GestureDetector(
+          onTap: () => Navigator.push(context,
+              MaterialPageRoute(builder: (_) => const TransferReviewScreen())),
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: Colors.teal.withOpacity(0.35)),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: Colors.teal.withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(Icons.swap_horiz_rounded,
+                      color: Colors.teal, size: 22),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '$count possible transfer${count == 1 ? '' : 's'} detected',
+                        style: const TextStyle(
+                            color: AppColors.textPrimary,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14),
+                      ),
+                      const SizedBox(height: 2),
+                      const Text(
+                        'Review to keep spending totals accurate',
+                        style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.chevron_right, color: AppColors.textSecondary),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 

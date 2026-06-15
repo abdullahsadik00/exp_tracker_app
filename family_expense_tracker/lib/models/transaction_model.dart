@@ -18,6 +18,8 @@ class TransactionModel {
   final String rawSmsText;
   final String? notes;
   final double? closingBalance;
+  // 0 = unreviewed, 1 = confirmed transfer, -1 = dismissed (not a transfer)
+  final int isTransfer;
 
   TransactionModel({
     required this.id,
@@ -31,6 +33,7 @@ class TransactionModel {
     required this.rawSmsText,
     this.notes,
     this.closingBalance,
+    this.isTransfer = 0,
   });
 
   TransactionModel copyWith({
@@ -45,6 +48,7 @@ class TransactionModel {
     String? rawSmsText,
     String? notes,
     double? closingBalance,
+    int? isTransfer,
   }) {
     return TransactionModel(
       id: id ?? this.id,
@@ -58,6 +62,7 @@ class TransactionModel {
       rawSmsText: rawSmsText ?? this.rawSmsText,
       notes: notes ?? this.notes,
       closingBalance: closingBalance ?? this.closingBalance,
+      isTransfer: isTransfer ?? this.isTransfer,
     );
   }
 
@@ -74,6 +79,7 @@ class TransactionModel {
       'rawSmsText': rawSmsText,
       'notes': notes ?? '',
       'closingBalance': closingBalance,
+      'is_transfer': isTransfer,
     };
   }
 
@@ -91,6 +97,7 @@ class TransactionModel {
         rawSmsText: (json['rawSmsText'] ?? '').toString(),
         notes: (json['notes'] ?? '').toString(),
         closingBalance: json['closingBalance'] != null ? double.tryParse(json['closingBalance'].toString()) : null,
+        isTransfer: (json['is_transfer'] as num?)?.toInt() ?? 0,
       );
     } catch (e) {
       // Return a partially corrupt but safe-to-render dummy if parsing fails fundamentally

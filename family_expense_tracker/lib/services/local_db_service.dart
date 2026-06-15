@@ -30,7 +30,7 @@ class LocalDbService {
 
     return await openDatabase(
       path,
-      version: 4,
+      version: 5,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE transactions (
@@ -44,7 +44,8 @@ class LocalDbService {
             rawSmsText TEXT,
             description TEXT,
             closingBalance REAL,
-            notes TEXT
+            notes TEXT,
+            is_transfer INTEGER DEFAULT 0
           )
         ''');
         await db.execute('CREATE INDEX idx_date ON transactions (date)');
@@ -93,6 +94,13 @@ class LocalDbService {
           ''');
           final existing = await db.query('categorization_rules');
           if (existing.isEmpty) await _seedDefaultRules(db);
+        }
+        if (oldVersion < 5) {
+          await db.execute(
+            'ALTER TABLE transactions ADD COLUMN is_transfer INTEGER DEFAULT 0');
+          // Auto-mark existing manually-added Transfer category transactions
+          await db.execute(
+            "UPDATE transactions SET is_transfer = 1 WHERE category = 'Transfer'");
         }
       },
     );
@@ -349,22 +357,23 @@ class LocalDbService {
     );
     stats['balance'] = (balanceResult.first['total'] as num?)?.toDouble() ?? 0.0;
 
-    // 2. Current Month Totals
+    // 2. Current Month Totals (exclude confirmed transfers)
     final monthTotals = await db.rawQuery('''
-      SELECT 
+      SELECT
         SUM(CASE WHEN type = 'credit' THEN amount ELSE 0 END) as income,
         SUM(CASE WHEN type = 'debit' THEN amount ELSE 0 END) as expense
-      FROM transactions 
-      WHERE date LIKE '$monthStr%'
+      FROM transactions
+      WHERE date LIKE '$monthStr%' AND (is_transfer IS NULL OR is_transfer != 1)
     ''');
     stats['total_income'] = (monthTotals.first['income'] as num?)?.toDouble() ?? 0.0;
     stats['total_expense'] = (monthTotals.first['expense'] as num?)?.toDouble() ?? 0.0;
 
-    // 3. Person specific flow (Monthly)
+    // 3. Person specific flow (Monthly, exclude transfers)
     final personFlows = await db.rawQuery('''
       SELECT assignedTo, SUM(CASE WHEN type = 'credit' THEN amount ELSE -amount END) as flow
-      FROM transactions 
+      FROM transactions
       WHERE date LIKE '$monthStr%' AND assignedTo IN ('Mom', 'Dad')
+        AND (is_transfer IS NULL OR is_transfer != 1)
       GROUP BY assignedTo
     ''');
     for (var row in personFlows) {
@@ -372,11 +381,12 @@ class LocalDbService {
       if (row['assignedTo'] == 'Dad') stats['dad_flow'] = (row['flow'] as num?)?.toDouble() ?? 0.0;
     }
 
-    // 4. Me specific Bank flows (Monthly)
+    // 4. Me specific Bank flows (Monthly, exclude transfers)
     final bankFlows = await db.rawQuery('''
       SELECT bankName, type, SUM(amount) as total
-      FROM transactions 
+      FROM transactions
       WHERE date LIKE '$monthStr%' AND assignedTo = 'Me' AND bankName IN ('SBI', 'BoB')
+        AND (is_transfer IS NULL OR is_transfer != 1)
       GROUP BY bankName, type
     ''');
     for (var row in bankFlows) {
@@ -551,8 +561,9 @@ class LocalDbService {
     // Get spending per category for current month
     final List<Map<String, dynamic>> spending = await db.rawQuery('''
       SELECT category, SUM(amount) as total
-      FROM transactions 
+      FROM transactions
       WHERE date LIKE '$monthStr%' AND type = 'debit'
+        AND (is_transfer IS NULL OR is_transfer != 1)
       GROUP BY category
     ''');
 
@@ -595,6 +606,7 @@ class LocalDbService {
         WHERE type = 'debit' AND category = ?
           AND date >= date('now', '-4 months')
           AND strftime('%Y-%m', date) != strftime('%Y-%m', 'now')
+          AND (is_transfer IS NULL OR is_transfer != 1)
         GROUP BY m
       )
     ''', [category]);
@@ -610,6 +622,7 @@ class LocalDbService {
       SELECT category, SUM(amount) as current_amount
       FROM transactions
       WHERE type = 'debit' AND date LIKE '$monthStr%'
+        AND (is_transfer IS NULL OR is_transfer != 1)
       GROUP BY category
     ''');
 
@@ -620,6 +633,7 @@ class LocalDbService {
         WHERE type = 'debit'
           AND date >= date('now', '-4 months')
           AND strftime('%Y-%m', date) != '$monthStr'
+          AND (is_transfer IS NULL OR is_transfer != 1)
         GROUP BY category, m
       )
       GROUP BY category
@@ -660,6 +674,7 @@ class LocalDbService {
       SELECT SUM(amount) as current_spend
       FROM transactions
       WHERE type = 'debit' AND date LIKE '$monthStr%'
+        AND (is_transfer IS NULL OR is_transfer != 1)
     ''');
     final currentSpend = (result.first['current_spend'] as num?)?.toDouble() ?? 0.0;
     final forecastedSpend = daysElapsed > 0 ? (currentSpend / daysElapsed) * totalDays : 0.0;
@@ -675,6 +690,62 @@ class LocalDbService {
       'totalBudget': totalBudget,
     };
   }
+
+  // ── Transfer Detection ───────────────────────────────────────────────────────
+
+  /// Returns candidate transfer pairs: same amount, opposite type, different banks, within 48h.
+  Future<List<Map<String, dynamic>>> getPotentialTransferPairs() async {
+    final db = await database;
+    final rows = await db.rawQuery('''
+      SELECT
+        t1.id        AS debit_id,
+        t1.amount    AS amount,
+        t1.bankName  AS from_bank,
+        t1.date      AS debit_date,
+        t1.description AS debit_desc,
+        t2.id        AS credit_id,
+        t2.bankName  AS to_bank,
+        t2.date      AS credit_date,
+        t2.description AS credit_desc
+      FROM transactions t1
+      INNER JOIN transactions t2 ON (
+        t1.amount = t2.amount
+        AND t2.type = 'credit'
+        AND t1.bankName != t2.bankName
+        AND ABS(julianday(t1.date) - julianday(t2.date)) <= 2.0
+        AND (t2.is_transfer IS NULL OR t2.is_transfer = 0)
+      )
+      WHERE t1.type = 'debit'
+        AND (t1.is_transfer IS NULL OR t1.is_transfer = 0)
+        AND t1.date >= date('now', '-3 months')
+      ORDER BY t1.date DESC
+      LIMIT 20
+    ''');
+    return rows.map((r) => Map<String, dynamic>.from(r)).toList();
+  }
+
+  /// Marks both legs of a transfer pair as confirmed (is_transfer = 1).
+  Future<void> confirmTransferPair(String debitId, String creditId) async {
+    final db = await database;
+    await db.rawUpdate(
+      "UPDATE transactions SET is_transfer = 1, category = 'Transfer' WHERE id IN (?, ?)",
+      [debitId, creditId],
+    );
+    notifyChange();
+  }
+
+  /// Marks both legs as dismissed (is_transfer = -1) so they won't appear again.
+  Future<void> dismissTransferPair(String debitId, String creditId) async {
+    final db = await database;
+    await db.rawUpdate(
+      'UPDATE transactions SET is_transfer = -1 WHERE id IN (?, ?)',
+      [debitId, creditId],
+    );
+    notifyChange();
+  }
+
+  Stream<List<Map<String, dynamic>>> get potentialTransferPairsStream =>
+      _streamOf(getPotentialTransferPairs);
 
   /// Finds descriptions that appear as debits in 3+ distinct months over the last 6 months.
   Future<List<Map<String, dynamic>>> getRecurringPatterns() async {
@@ -706,8 +777,9 @@ class LocalDbService {
       final monthKey = DateFormat('MMM').format(date);
       
       final result = await db.rawQuery('''
-        SELECT SUM(amount) as total FROM transactions 
+        SELECT SUM(amount) as total FROM transactions
         WHERE date LIKE '$monthStr%' AND type = 'debit'
+          AND (is_transfer IS NULL OR is_transfer != 1)
       ''');
       
       trend[monthKey] = (result.first['total'] as num?)?.toDouble() ?? 0.0;

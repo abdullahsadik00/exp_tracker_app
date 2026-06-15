@@ -555,6 +555,15 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                 maxLines: 1,
               ),
             ),
+            if (txn.isTransfer == 1)
+              Tooltip(
+                message: 'Confirmed transfer — excluded from spending',
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: Icon(Icons.swap_horiz_rounded,
+                      size: 14, color: Colors.teal.withOpacity(0.8)),
+                ),
+              ),
             if (_recurringDescriptions.contains(txn.description.toLowerCase()))
               Tooltip(
                 message: 'Recurring transaction',
