@@ -2,6 +2,7 @@ import 'package:flutter_sms_inbox/flutter_sms_inbox.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../models/transaction_model.dart';
 import 'categorization_service.dart';
+import 'local_db_service.dart';
 
 class SmsService {
   Future<void> requestSmsPermission() async {
@@ -12,6 +13,9 @@ class SmsService {
   }
 
   Future<List<TransactionModel>> fetchBankMessages() async {
+    final rules = await LocalDbService.instance.getCategorizationRules();
+    final categorizer = CategorizationService(rules);
+
     final smsQuery = SmsQuery();
 
     // flutter_sms_inbox uses querySms, not query with SQL syntax
@@ -92,7 +96,7 @@ class SmsService {
         }
         
         // Smart Categorization
-        final analysis = CategorizationService.analyzeTransaction(body, type);
+        final analysis = categorizer.analyzeTransaction(body, type);
 
         transactions.add(
           TransactionModel(

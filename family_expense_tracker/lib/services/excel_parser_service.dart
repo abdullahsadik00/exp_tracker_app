@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import 'package:flutter/foundation.dart';
 import '../models/transaction_model.dart';
 import 'categorization_service.dart';
+import 'local_db_service.dart';
 
 /// Top-level function to decode Excel in a background isolate
 List<Map<String, dynamic>> _decodeExcelInBackground(List<int> bytes) {
@@ -59,7 +60,10 @@ class ExcelParserService {
     try {
       // 1. Decode Excel and scan rows in a background isolate to avoid ANR
       final List<Map<String, dynamic>> rawData = await compute(_decodeExcelInBackground, bytes);
-      
+
+      final rules = await LocalDbService.instance.getCategorizationRules();
+      final categorizer = CategorizationService(rules);
+
       List<TransactionModel> transactions = [];
 
       // 2. Process extracted data on the main thread for categorization
@@ -78,8 +82,7 @@ class ExcelParserService {
           String type = (credit != null && credit > 0) ? 'credit' : 'debit';
           double amount = (type == 'credit') ? credit! : (debit ?? 0.0);
           
-          // Categorize using existing service (on main thread)
-          var analysis = CategorizationService.analyzeTransaction(description, type);
+          var analysis = categorizer.analyzeTransaction(description, type);
           
           transactions.add(TransactionModel(
             id: '${DateTime.now().millisecondsSinceEpoch}_${transactions.length}',

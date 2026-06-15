@@ -5,6 +5,7 @@ import 'package:sqflite/sqflite.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import '../models/transaction_model.dart';
+import 'categorization_service.dart';
 import 'dart:async';
 import 'package:intl/intl.dart';
 
@@ -29,7 +30,7 @@ class LocalDbService {
 
     return await openDatabase(
       path,
-      version: 3,
+      version: 4,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE transactions (
@@ -54,6 +55,17 @@ class LocalDbService {
             amount REAL
           )
         ''');
+        await db.execute('''
+          CREATE TABLE categorization_rules(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            keyword TEXT NOT NULL,
+            category TEXT,
+            assigned_to TEXT,
+            bank_name TEXT,
+            priority INTEGER DEFAULT 100
+          )
+        ''');
+        await _seedDefaultRules(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -68,11 +80,146 @@ class LocalDbService {
             )
           ''');
         }
+        if (oldVersion < 4) {
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS categorization_rules(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              keyword TEXT NOT NULL,
+              category TEXT,
+              assigned_to TEXT,
+              bank_name TEXT,
+              priority INTEGER DEFAULT 100
+            )
+          ''');
+          final existing = await db.query('categorization_rules');
+          if (existing.isEmpty) await _seedDefaultRules(db);
+        }
       },
     );
   }
 
-  // CRUD Methods
+  static Future<void> _seedDefaultRules(Database db) async {
+    final rules = <Map<String, dynamic>>[
+      // Bank detection (priority 10)
+      {'keyword': 'BARODA', 'bank_name': 'BoB', 'priority': 10},
+      {'keyword': 'BARB',   'bank_name': 'BoB', 'priority': 10},
+      {'keyword': 'BOB',    'bank_name': 'BoB', 'priority': 10},
+      // Person assignment (priority 20)
+      {'keyword': 'ABDULLAHSA', 'assigned_to': 'Me',  'priority': 20},
+      {'keyword': 'NILOFAR',    'assigned_to': 'Mom', 'priority': 20},
+      {'keyword': 'MOHD AAYAN', 'assigned_to': 'Dad', 'priority': 20},
+      {'keyword': 'NAMDEO V',   'assigned_to': 'Dad', 'priority': 20},
+      {'keyword': 'AQUIB AS',   'assigned_to': 'Dad', 'priority': 20},
+      {'keyword': 'RAJAN HA',   'assigned_to': 'Dad', 'priority': 20},
+      {'keyword': 'ABBU',       'assigned_to': 'Dad', 'priority': 20},
+      {'keyword': 'MUBEEN M',   'assigned_to': 'Me',  'priority': 20},
+      {'keyword': 'HEENA',      'assigned_to': 'Me',  'priority': 20},
+      {'keyword': 'AMREEN',     'assigned_to': 'Me',  'priority': 20},
+      {'keyword': 'IMRAN SH',   'assigned_to': 'Me',  'priority': 20},
+      {'keyword': 'ALIABBAS',   'assigned_to': 'Me',  'priority': 20},
+      {'keyword': 'YUNUS BA',   'assigned_to': 'Me',  'priority': 20},
+      {'keyword': 'FAIZA FE',   'assigned_to': 'Me',  'priority': 20},
+      {'keyword': 'ZAIN',       'assigned_to': 'Me',  'priority': 20},
+      // Category rules (priority 30)
+      {'keyword': 'BEE LOGICA',    'category': 'Salary',        'assigned_to': 'Me', 'priority': 30},
+      {'keyword': 'INSUFFICIENT',  'category': 'Other',         'priority': 30},
+      {'keyword': 'BSNL',          'category': 'Utilities',     'priority': 30},
+      {'keyword': 'GOOGLE I',      'category': 'Utilities',     'priority': 30},
+      {'keyword': 'AMAZON',        'category': 'Utilities',     'priority': 30},
+      {'keyword': 'BAREERAH',      'category': 'Utilities',     'priority': 30},
+      {'keyword': 'WIFI',          'category': 'Utilities',     'priority': 30},
+      {'keyword': 'LIGHT',         'category': 'Utilities',     'priority': 30},
+      {'keyword': 'ELECTRICITY',   'category': 'Utilities',     'priority': 30},
+      {'keyword': 'DAWAT E',       'category': 'Gifts',         'priority': 30},
+      {'keyword': 'DAWATEISLA',    'category': 'Gifts',         'priority': 30},
+      {'keyword': 'SHADI',         'category': 'Gifts',         'priority': 30},
+      {'keyword': 'WEDDING',       'category': 'Gifts',         'priority': 30},
+      {'keyword': 'LAXMI',         'category': 'Gifts',         'priority': 30},
+      {'keyword': 'MUKESH C',      'category': 'Groceries',     'priority': 30},
+      {'keyword': 'PRAKASH',       'category': 'Groceries',     'priority': 30},
+      {'keyword': 'BLINKIT',       'category': 'Groceries',     'priority': 30},
+      {'keyword': 'JOHIRUL',       'category': 'Groceries',     'priority': 30},
+      {'keyword': 'MAHENDRA',      'category': 'Groceries',     'priority': 30},
+      {'keyword': 'MILAN SU',      'category': 'Groceries',     'priority': 30},
+      {'keyword': 'JAGDISHC',      'category': 'Groceries',     'priority': 30},
+      {'keyword': 'MAHA BAL',      'category': 'Groceries',     'priority': 30},
+      {'keyword': 'HARIOM',        'category': 'Groceries',     'priority': 30},
+      {'keyword': 'MILK',          'category': 'Groceries',     'priority': 30},
+      {'keyword': 'DAHI',          'category': 'Groceries',     'priority': 30},
+      {'keyword': 'EGG',           'category': 'Groceries',     'priority': 30},
+      {'keyword': 'GROCE',         'category': 'Groceries',     'priority': 30},
+      {'keyword': 'DMART',         'category': 'Groceries',     'priority': 30},
+      {'keyword': 'PHYSIOMA',      'category': 'Healthcare',    'priority': 30},
+      {'keyword': 'WELLNESS',      'category': 'Healthcare',    'priority': 30},
+      {'keyword': 'RELAXSTA',      'category': 'Healthcare',    'priority': 30},
+      {'keyword': 'MANTHAN',       'category': 'Healthcare',    'priority': 30},
+      {'keyword': 'DR AMIR',       'category': 'Healthcare',    'priority': 30},
+      {'keyword': 'MEDICAL',       'category': 'Healthcare',    'priority': 30},
+      {'keyword': 'CLINIC',        'category': 'Healthcare',    'priority': 30},
+      {'keyword': 'TAKWIM N',      'category': 'Dining',        'priority': 30},
+      {'keyword': 'ISRAR BAIG',    'category': 'Dining',        'priority': 30},
+      {'keyword': 'CHINNASA',      'category': 'Dining',        'priority': 30},
+      {'keyword': 'SAMADHAN',      'category': 'Dining',        'priority': 30},
+      {'keyword': 'CROWN BA',      'category': 'Dining',        'priority': 30},
+      {'keyword': 'RESTAURANT',    'category': 'Dining',        'priority': 30},
+      {'keyword': 'CAFE',          'category': 'Dining',        'priority': 30},
+      {'keyword': 'TEA',           'category': 'Dining',        'priority': 30},
+      {'keyword': 'SBIMOPS',       'category': 'Transfer',      'priority': 30},
+      {'keyword': 'ATM',           'category': 'Transfer',      'priority': 30},
+      {'keyword': 'SERAJ MU',      'category': 'Personal Care', 'priority': 30},
+      {'keyword': 'AVENUE S',      'category': 'Personal Care', 'priority': 30},
+      {'keyword': 'SALON',         'category': 'Personal Care', 'priority': 30},
+      {'keyword': 'GYM',           'category': 'Personal Care', 'priority': 30},
+      {'keyword': 'ROYAL SN',      'category': 'Entertainment', 'priority': 30},
+      {'keyword': 'ANGEL LT',      'category': 'Investment',    'priority': 30},
+      {'keyword': 'XEROX',         'category': 'Education',     'priority': 30},
+      {'keyword': 'BOMBAY',        'category': 'Education',     'priority': 30},
+      {'keyword': 'FLIPKART',      'category': 'Shopping',      'priority': 30},
+      {'keyword': 'MEESHO',        'category': 'Shopping',      'priority': 30},
+      {'keyword': 'SUPREME',       'category': 'Shopping',      'priority': 30},
+      {'keyword': 'CAB',           'category': 'Transportation', 'priority': 30},
+      {'keyword': 'AUTO',          'category': 'Transportation', 'priority': 30},
+      {'keyword': 'RICK',          'category': 'Transportation', 'priority': 30},
+    ];
+    final batch = db.batch();
+    for (final rule in rules) {
+      batch.insert('categorization_rules', rule);
+    }
+    await batch.commit(noResult: true);
+  }
+
+  // ─── Categorization Rules CRUD ─────────────────────────────────────────────
+
+  Future<List<CategorizationRule>> getCategorizationRules() async {
+    final db = await database;
+    final maps = await db.query('categorization_rules', orderBy: 'priority ASC, keyword ASC');
+    return maps.map((m) => CategorizationRule.fromMap(m)).toList();
+  }
+
+  Future<void> insertCategorizationRule(CategorizationRule rule) async {
+    final db = await database;
+    await db.insert('categorization_rules', rule.toMap()..remove('id'));
+    notifyChange();
+  }
+
+  Future<void> updateCategorizationRule(CategorizationRule rule) async {
+    final db = await database;
+    await db.update(
+      'categorization_rules',
+      rule.toMap(),
+      where: 'id = ?',
+      whereArgs: [rule.id],
+    );
+    notifyChange();
+  }
+
+  Future<void> deleteCategorizationRule(int id) async {
+    final db = await database;
+    await db.delete('categorization_rules', where: 'id = ?', whereArgs: [id]);
+    notifyChange();
+  }
+
+  // ─── CRUD Methods ──────────────────────────────────────────────────────────
   Future<void> insertTransaction(TransactionModel transaction) async {
     final db = await database;
     await db.insert(
@@ -555,6 +702,9 @@ class LocalDbService {
 
   Stream<Map<String, double>> get yearlySpendingTrendStream =>
       _streamOf(getYearlySpendingTrend);
+
+  Stream<List<CategorizationRule>> get categorizationRulesStream =>
+      _streamOf(getCategorizationRules);
   
   // Bulk Update Bank
   Future<void> bulkUpdateBank(Set<String> txIds, String newBank) async {

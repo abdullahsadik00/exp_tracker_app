@@ -3,6 +3,7 @@ import '../services/sms_service.dart';
 import '../services/local_db_service.dart';
 import '../models/transaction_model.dart';
 import 'add_transaction_screen.dart';
+import 'categorization_rules_screen.dart';
 import 'pdf_statement_screen.dart';
 import 'transactions_screen.dart';
 
@@ -89,7 +90,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
           PopupMenuButton<String>(
             onSelected: (value) async {
-              if (value == 'backup') {
+              if (value == 'rules') {
+                Navigator.push(context,
+                    MaterialPageRoute(builder: (_) => const CategorizationRulesScreen()));
+              } else if (value == 'backup') {
                 await _localDbService.backupDatabase();
               } else if (value == 'restore') {
                 FilePickerResult? result = await FilePicker.pickFiles(
@@ -113,7 +117,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
             },
             icon: const Icon(Icons.more_vert, color: AppColors.textPrimary),
             itemBuilder: (context) => [
-              const PopupMenuItem(value: 'backup', child: Text('Backup Data', style: TextStyle(color: AppColors.textPrimary))),
+              const PopupMenuItem(value: 'rules',   child: Text('Auto-Categorization Rules', style: TextStyle(color: AppColors.textPrimary))),
+              const PopupMenuItem(value: 'backup',  child: Text('Backup Data',  style: TextStyle(color: AppColors.textPrimary))),
               const PopupMenuItem(value: 'restore', child: Text('Restore Data', style: TextStyle(color: AppColors.textPrimary))),
             ],
           ),

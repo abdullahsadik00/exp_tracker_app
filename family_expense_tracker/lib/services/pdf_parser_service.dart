@@ -1,11 +1,14 @@
 import 'package:intl/intl.dart';
 import '../models/transaction_model.dart';
 import 'categorization_service.dart';
+import 'local_db_service.dart';
 
 class PdfParserService {
   /// Parses a bank statement string into a list of TransactionModel objects.
   /// This logic matches the specific layouts for SBI and BoB e-statements.
-  static List<TransactionModel> parseStatement(String text) {
+  static Future<List<TransactionModel>> parseStatement(String text) async {
+    final rules = await LocalDbService.instance.getCategorizationRules();
+    final categorizer = CategorizationService(rules);
     List<TransactionModel> parsedTransactions = [];
     final lines = text.split('\n');
     
@@ -50,8 +53,7 @@ class PdfParserService {
             String dateStr = dateMatch.group(0)!;
             DateTime parsedDate = _parseDate(dateStr);
 
-            // Use the Smart Categorization Engine
-            final analysis = CategorizationService.analyzeTransaction(trimmedLine, type);
+            final analysis = categorizer.analyzeTransaction(trimmedLine, type);
 
             parsedTransactions.add(TransactionModel(
               id: '', // ID will be assigned by the database service
