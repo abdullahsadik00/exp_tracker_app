@@ -28,6 +28,7 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
   final List<String> _filters = ['All', 'Unassigned', 'Me', 'Mom', 'Dad', 'SBI', 'BoB'];
   String _selectedMonth = 'All Time';
   String _selectedCategory = 'All Categories';
+  Set<String> _recurringDescriptions = {};
 
   // Categories are now managed in TransactionModel.availableCategories
 
@@ -36,8 +37,12 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
     super.initState();
     _selectedFilter = widget.initialFilter ?? 'All';
     _loadTransactions();
+    _loadRecurringPatterns();
     _dbChangeSubscription = _localDbService.onChange.listen((_) {
-      if (mounted) _loadTransactions();
+      if (mounted) {
+        _loadTransactions();
+        _loadRecurringPatterns();
+      }
     });
   }
 
@@ -71,6 +76,17 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
       setState(() {
         _allTransactions = data;
         _isLoading = false;
+      });
+    }
+  }
+
+  Future<void> _loadRecurringPatterns() async {
+    final patterns = await _localDbService.getRecurringPatterns();
+    if (mounted) {
+      setState(() {
+        _recurringDescriptions = patterns
+            .map((p) => (p['description'] as String).toLowerCase())
+            .toSet();
       });
     }
   }
@@ -539,6 +555,15 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                 maxLines: 1,
               ),
             ),
+            if (_recurringDescriptions.contains(txn.description.toLowerCase()))
+              Tooltip(
+                message: 'Recurring transaction',
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: Icon(Icons.repeat_rounded,
+                      size: 14, color: AppColors.accent.withOpacity(0.7)),
+                ),
+              ),
             _buildCategoryBadge(txn.category),
           ],
         ),

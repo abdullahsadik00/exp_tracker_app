@@ -583,6 +583,119 @@ class LocalDbService {
     return null;
   }
 
+  // ── Smart Intelligence ──────────────────────────────────────────────────────
+
+  /// Returns the 3-month average monthly spend for a category (excluding current month).
+  Future<double> getCategoryAverage(String category) async {
+    final db = await database;
+    final result = await db.rawQuery('''
+      SELECT AVG(monthly) as avg FROM (
+        SELECT strftime('%Y-%m', date) as m, SUM(amount) as monthly
+        FROM transactions
+        WHERE type = 'debit' AND category = ?
+          AND date >= date('now', '-4 months')
+          AND strftime('%Y-%m', date) != strftime('%Y-%m', 'now')
+        GROUP BY m
+      )
+    ''', [category]);
+    return (result.first['avg'] as num?)?.toDouble() ?? 0.0;
+  }
+
+  /// Returns categories where this month's spend is ≥ 1.5× the 3-month average.
+  Future<List<Map<String, dynamic>>> getSpendingAnomalies() async {
+    final db = await database;
+    final monthStr = DateFormat('yyyy-MM').format(DateTime.now());
+
+    final currentRows = await db.rawQuery('''
+      SELECT category, SUM(amount) as current_amount
+      FROM transactions
+      WHERE type = 'debit' AND date LIKE '$monthStr%'
+      GROUP BY category
+    ''');
+
+    final avgRows = await db.rawQuery('''
+      SELECT category, AVG(monthly) as avg_amount FROM (
+        SELECT category, strftime('%Y-%m', date) as m, SUM(amount) as monthly
+        FROM transactions
+        WHERE type = 'debit'
+          AND date >= date('now', '-4 months')
+          AND strftime('%Y-%m', date) != '$monthStr'
+        GROUP BY category, m
+      )
+      GROUP BY category
+    ''');
+
+    final avgMap = <String, double>{
+      for (final r in avgRows)
+        r['category'] as String: (r['avg_amount'] as num?)?.toDouble() ?? 0.0,
+    };
+
+    final anomalies = <Map<String, dynamic>>[];
+    for (final row in currentRows) {
+      final cat = row['category'] as String;
+      final current = (row['current_amount'] as num).toDouble();
+      final avg = avgMap[cat] ?? 0.0;
+      if (avg > 200 && current >= avg * 1.5) {
+        anomalies.add({
+          'category': cat,
+          'currentAmount': current,
+          'avgAmount': avg,
+          'ratio': current / avg,
+        });
+      }
+    }
+    anomalies.sort((a, b) => (b['ratio'] as double).compareTo(a['ratio'] as double));
+    return anomalies;
+  }
+
+  /// Projects end-of-month spend based on daily burn rate so far.
+  Future<Map<String, dynamic>> getMonthEndForecast() async {
+    final db = await database;
+    final now = DateTime.now();
+    final monthStr = DateFormat('yyyy-MM').format(now);
+    final daysElapsed = now.day;
+    final totalDays = DateTime(now.year, now.month + 1, 0).day;
+
+    final result = await db.rawQuery('''
+      SELECT SUM(amount) as current_spend
+      FROM transactions
+      WHERE type = 'debit' AND date LIKE '$monthStr%'
+    ''');
+    final currentSpend = (result.first['current_spend'] as num?)?.toDouble() ?? 0.0;
+    final forecastedSpend = daysElapsed > 0 ? (currentSpend / daysElapsed) * totalDays : 0.0;
+
+    final budgetsResult = await db.rawQuery('SELECT SUM(amount) as total FROM budgets');
+    final totalBudget = (budgetsResult.first['total'] as num?)?.toDouble() ?? 0.0;
+
+    return {
+      'currentSpend': currentSpend,
+      'forecastedSpend': forecastedSpend,
+      'daysElapsed': daysElapsed,
+      'totalDays': totalDays,
+      'totalBudget': totalBudget,
+    };
+  }
+
+  /// Finds descriptions that appear as debits in 3+ distinct months over the last 6 months.
+  Future<List<Map<String, dynamic>>> getRecurringPatterns() async {
+    final db = await database;
+    final rows = await db.rawQuery('''
+      SELECT
+        description,
+        category,
+        COUNT(DISTINCT strftime('%Y-%m', date)) AS month_count,
+        ROUND(AVG(amount), 2) AS avg_amount,
+        MAX(date) AS last_seen
+      FROM transactions
+      WHERE type = 'debit' AND date >= date('now', '-6 months')
+      GROUP BY LOWER(description)
+      HAVING month_count >= 3
+      ORDER BY avg_amount DESC
+      LIMIT 30
+    ''');
+    return rows.map((r) => Map<String, dynamic>.from(r)).toList();
+  }
+
   Future<Map<String, double>> getYearlySpendingTrend() async {
     final db = await database;
     Map<String, double> trend = {};
@@ -705,6 +818,15 @@ class LocalDbService {
 
   Stream<List<CategorizationRule>> get categorizationRulesStream =>
       _streamOf(getCategorizationRules);
+
+  Stream<List<Map<String, dynamic>>> get anomaliesStream =>
+      _streamOf(getSpendingAnomalies);
+
+  Stream<Map<String, dynamic>> get forecastStream =>
+      _streamOf(getMonthEndForecast);
+
+  Stream<List<Map<String, dynamic>>> get recurringPatternsStream =>
+      _streamOf(getRecurringPatterns);
   
   // Bulk Update Bank
   Future<void> bulkUpdateBank(Set<String> txIds, String newBank) async {

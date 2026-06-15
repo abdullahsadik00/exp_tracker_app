@@ -133,6 +133,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
             children: [
               _buildStatsCarousel(),
               const SizedBox(height: 32),
+              _buildSmartInsightsSection(),
+              const SizedBox(height: 32),
               _buildSectionHeader('Needs Tagging (Inbox)', onViewAll: () {
                 Navigator.push(
                   context,
@@ -631,6 +633,214 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // ── Smart Insights ──────────────────────────────────────────────────────────
+
+  Widget _buildSmartInsightsSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildSectionHeader('Smart Insights'),
+        const SizedBox(height: 16),
+        _buildForecastCard(),
+        const SizedBox(height: 12),
+        _buildAnomaliesCard(),
+      ],
+    );
+  }
+
+  Widget _buildForecastCard() {
+    return StreamBuilder<Map<String, dynamic>>(
+      stream: _localDbService.forecastStream,
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) return const SizedBox.shrink();
+        final data = snapshot.data!;
+        final current = data['currentSpend'] as double;
+        final forecast = data['forecastedSpend'] as double;
+        final daysElapsed = data['daysElapsed'] as int;
+        final totalDays = data['totalDays'] as int;
+        final totalBudget = data['totalBudget'] as double;
+        final currencyFormat = NumberFormat.currency(symbol: '₹', decimalDigits: 0);
+
+        if (forecast == 0) return const SizedBox.shrink();
+
+        final hasBudget = totalBudget > 0;
+        final isOver = hasBudget && forecast > totalBudget;
+        final progress = hasBudget ? (forecast / totalBudget).clamp(0.0, 1.0) : null;
+        final accentColor = isOver ? AppColors.debit : AppColors.accent;
+
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: accentColor.withOpacity(0.25)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(isOver ? Icons.trending_up_rounded : Icons.insights_rounded,
+                      color: accentColor, size: 20),
+                  const SizedBox(width: 10),
+                  Text('Month-End Forecast',
+                      style: TextStyle(
+                          color: accentColor, fontWeight: FontWeight.bold, fontSize: 14)),
+                  const Spacer(),
+                  Text('Day $daysElapsed / $totalDays',
+                      style: const TextStyle(color: AppColors.textSecondary, fontSize: 11)),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(currencyFormat.format(forecast),
+                      style: TextStyle(
+                          color: accentColor,
+                          fontSize: 28,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: -1)),
+                  const SizedBox(width: 8),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Text('projected',
+                        style: const TextStyle(
+                            color: AppColors.textSecondary, fontSize: 12)),
+                  ),
+                  if (hasBudget) ...[
+                    const Spacer(),
+                    Text(
+                      '/ ${currencyFormat.format(totalBudget)} budget',
+                      style: TextStyle(
+                          color: isOver ? AppColors.debit : AppColors.textSecondary,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600),
+                    ),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '${currencyFormat.format(current)} spent so far',
+                style: const TextStyle(color: AppColors.textSecondary, fontSize: 12),
+              ),
+              if (progress != null) ...[
+                const SizedBox(height: 12),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: progress,
+                    backgroundColor: Colors.white.withOpacity(0.05),
+                    color: accentColor,
+                    minHeight: 5,
+                  ),
+                ),
+                if (isOver)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text(
+                      '⚠ Projected to exceed budget by ${currencyFormat.format(forecast - totalBudget)}',
+                      style: const TextStyle(color: AppColors.debit, fontSize: 11),
+                    ),
+                  ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildAnomaliesCard() {
+    return StreamBuilder<List<Map<String, dynamic>>>(
+      stream: _localDbService.anomaliesStream,
+      builder: (context, snapshot) {
+        final anomalies = snapshot.data ?? [];
+        if (anomalies.isEmpty) return const SizedBox.shrink();
+
+        final currencyFormat = NumberFormat.currency(symbol: '₹', decimalDigits: 0);
+
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.amber.withOpacity(0.25)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.warning_amber_rounded, color: Colors.amber, size: 20),
+                  const SizedBox(width: 10),
+                  const Text('Spending Spikes',
+                      style: TextStyle(
+                          color: Colors.amber,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14)),
+                  const Spacer(),
+                  Text('vs 3-month avg',
+                      style: TextStyle(
+                          color: AppColors.textSecondary.withOpacity(0.6), fontSize: 11)),
+                ],
+              ),
+              const SizedBox(height: 16),
+              ...anomalies.take(3).map((a) {
+                final cat = a['category'] as String;
+                final current = a['currentAmount'] as double;
+                final avg = a['avgAmount'] as double;
+                final ratio = a['ratio'] as double;
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(cat,
+                                style: const TextStyle(
+                                    color: AppColors.textPrimary,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 14)),
+                            const SizedBox(height: 2),
+                            Text(
+                              '${currencyFormat.format(current)} this month  •  avg ${currencyFormat.format(avg)}',
+                              style: const TextStyle(
+                                  color: AppColors.textSecondary, fontSize: 11),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: AppColors.debit.withOpacity(0.12),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          '↑ ${ratio.toStringAsFixed(1)}×',
+                          style: const TextStyle(
+                              color: AppColors.debit,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 13),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildBudgetSection() {
     return StreamBuilder<List<Map<String, dynamic>>>(
       stream: _localDbService.budgetProgressStream,
@@ -753,42 +963,76 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _showSetBudgetDialog(BuildContext context, {String? category, double? currentAmount}) {
-    final amountController = TextEditingController(text: currentAmount?.toString() ?? '');
+    final amountController = TextEditingController(text: currentAmount?.toStringAsFixed(0) ?? '');
     String selectedCategory = category ?? TransactionModel.availableCategories.first;
+    String? suggestionText;
+    bool loadingStarted = false;
+
+    Future<void> loadSuggestion(String cat, Function setDialogState) async {
+      final avg = await _localDbService.getCategoryAverage(cat);
+      if (avg > 0) {
+        setDialogState(() {
+          suggestionText = '3-month avg: ₹${avg.toStringAsFixed(0)}';
+          if (amountController.text.isEmpty) {
+            amountController.text = avg.toStringAsFixed(0);
+          }
+        });
+      }
+    }
 
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.surface,
-        title: Text(category == null ? 'Set New Budget' : 'Update $category Budget', 
-          style: const TextStyle(color: AppColors.textPrimary)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (category == null)
-              DropdownButtonFormField<String>(
-                value: selectedCategory,
-                dropdownColor: AppColors.surface,
-                style: const TextStyle(color: AppColors.textPrimary),
-                decoration: const InputDecoration(labelText: 'Category', labelStyle: TextStyle(color: AppColors.textSecondary)),
-                items: TransactionModel.availableCategories.map((c) => DropdownMenuItem(value: c, child: Text(c))).toList(),
-                onChanged: (val) => selectedCategory = val!,
-              ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: amountController,
-              keyboardType: TextInputType.number,
-              autofocus: true,
-              style: const TextStyle(color: AppColors.textPrimary),
-              decoration: const InputDecoration(
-                labelText: 'Monthly Limit (₹)',
-                labelStyle: TextStyle(color: AppColors.textSecondary),
-                enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: AppColors.accent)),
-                focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: AppColors.accent, width: 2)),
-              ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          if (category == null && suggestionText == null && !loadingStarted) {
+            loadingStarted = true;
+            loadSuggestion(selectedCategory, setDialogState);
+          }
+          return AlertDialog(
+            backgroundColor: AppColors.surface,
+            title: Text(category == null ? 'Set New Budget' : 'Update $category Budget',
+              style: const TextStyle(color: AppColors.textPrimary)),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (category == null)
+                  DropdownButtonFormField<String>(
+                    value: selectedCategory,
+                    dropdownColor: AppColors.surface,
+                    style: const TextStyle(color: AppColors.textPrimary),
+                    decoration: const InputDecoration(
+                      labelText: 'Category',
+                      labelStyle: TextStyle(color: AppColors.textSecondary)),
+                    items: TransactionModel.availableCategories
+                        .map((c) => DropdownMenuItem(value: c, child: Text(c)))
+                        .toList(),
+                    onChanged: (val) {
+                      selectedCategory = val!;
+                      amountController.clear();
+                      loadingStarted = false;
+                      setDialogState(() => suggestionText = null);
+                      loadSuggestion(val, setDialogState);
+                    },
+                  ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: amountController,
+                  keyboardType: TextInputType.number,
+                  autofocus: category != null,
+                  style: const TextStyle(color: AppColors.textPrimary),
+                  decoration: InputDecoration(
+                    labelText: 'Monthly Limit (₹)',
+                    labelStyle: const TextStyle(color: AppColors.textSecondary),
+                    helperText: suggestionText,
+                    helperStyle: const TextStyle(color: AppColors.accent, fontSize: 11),
+                    enabledBorder: const UnderlineInputBorder(
+                        borderSide: BorderSide(color: AppColors.accent)),
+                    focusedBorder: const UnderlineInputBorder(
+                        borderSide: BorderSide(color: AppColors.accent, width: 2)),
+                  ),
+                ),
+              ],
             ),
-          ],
-        ),
         actions: [
           if (category != null)
             TextButton(
@@ -811,6 +1055,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
             child: const Text('Save', style: TextStyle(color: Colors.white)),
           ),
         ],
+      );
+        },
       ),
     );
   }
