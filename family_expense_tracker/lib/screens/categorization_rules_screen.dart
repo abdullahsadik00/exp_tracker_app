@@ -68,11 +68,28 @@ class _CategorizationRulesScreenState extends State<CategorizationRulesScreen> {
                   );
                 }
 
-                return ListView.builder(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
-                  physics: const BouncingScrollPhysics(),
-                  itemCount: rules.length,
-                  itemBuilder: (context, index) => _buildRuleTile(rules[index]),
+                return Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                      child: Row(
+                        children: [
+                          Icon(Icons.swipe_left_outlined, size: 14, color: AppColors.textSecondary.withOpacity(0.45)),
+                          const SizedBox(width: 6),
+                          Text('Swipe left to delete a rule',
+                            style: TextStyle(color: AppColors.textSecondary.withOpacity(0.45), fontSize: 11)),
+                        ],
+                      ),
+                    ),
+                    Expanded(
+                      child: ListView.builder(
+                        padding: const EdgeInsets.fromLTRB(16, 4, 16, 100),
+                        physics: const BouncingScrollPhysics(),
+                        itemCount: rules.length,
+                        itemBuilder: (context, index) => _buildRuleTile(rules[index]),
+                      ),
+                    ),
+                  ],
                 );
               },
             ),

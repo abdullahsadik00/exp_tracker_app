@@ -343,8 +343,8 @@ class _CategoryInsightsScreenState extends State<CategoryInsightsScreen> {
                     x: entry.key,
                     barRods: [
                       BarChartRodData(
-                        toY: entry.value.value,
-                        color: AppColors.accent,
+                        toY: entry.value.value > 0 ? entry.value.value : (maxY * 0.015),
+                        color: entry.value.value > 0 ? AppColors.accent : AppColors.textSecondary.withOpacity(0.25),
                         width: 16,
                         borderRadius: const BorderRadius.only(topLeft: Radius.circular(4), topRight: Radius.circular(4)),
                       ),
@@ -429,9 +429,26 @@ class _CategoryInsightsScreenState extends State<CategoryInsightsScreen> {
         _buildMonthSelector(),
         const SizedBox(height: 16),
         if (paginatedList.isEmpty)
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 24),
-            child: Center(child: Text('No transactions for this month', style: TextStyle(color: AppColors.textSecondary))),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 32),
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.calendar_today_outlined, color: AppColors.textSecondary.withOpacity(0.4), size: 40),
+                  const SizedBox(height: 12),
+                  Text(
+                    'No transactions in ${_selectedMonthYear ?? 'this month'}',
+                    style: const TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Select a different month above',
+                    style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
           )
         else ...[
           ListView.builder(

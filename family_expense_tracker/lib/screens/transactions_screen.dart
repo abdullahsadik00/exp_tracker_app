@@ -126,7 +126,7 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
             elevation: 8,
           )
         : null,
-      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
+      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
     );
   }
 
@@ -247,7 +247,7 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
       ),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<String>(
-          value: items.contains(value) ? value : items.first,
+          value: items.isEmpty ? null : (items.contains(value) ? value : items.first),
           isExpanded: true,
           dropdownColor: AppColors.surface,
           icon: const Icon(Icons.arrow_drop_down, color: AppColors.accent),
@@ -307,7 +307,7 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
         return ListView.builder(
           key: const PageStorageKey('transactions_list_key'),
           physics: const BouncingScrollPhysics(),
-          padding: const EdgeInsets.symmetric(horizontal: 16),
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 80),
           itemCount: dateKeys.length + 1,
           itemBuilder: (context, index) {
             if (index == dateKeys.length) {
@@ -359,21 +359,27 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        IconButton(
-                          icon: const Icon(Icons.chevron_left, color: AppColors.accent),
-                          onPressed: _currentPage == 1 ? null : () => setState(() => _currentPage--),
+                        Opacity(
+                          opacity: _currentPage == 1 ? 0.35 : 1.0,
+                          child: IconButton(
+                            icon: const Icon(Icons.chevron_left, color: AppColors.accent),
+                            onPressed: _currentPage == 1 ? null : () => setState(() => _currentPage--),
+                          ),
                         ),
                         const SizedBox(width: 8),
                         TextButton.icon(
                           onPressed: () => _showJumpToPageDialog(context, totalPages),
                           icon: const Icon(Icons.edit, size: 16, color: AppColors.accent),
-                          label: Text('Page $_currentPage of $totalPages', 
+                          label: Text('Page $_currentPage of $totalPages',
                             style: const TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.bold, fontSize: 14)),
                         ),
                         const SizedBox(width: 8),
-                        IconButton(
-                          icon: const Icon(Icons.chevron_right, color: AppColors.accent),
-                          onPressed: _currentPage >= totalPages ? null : () => setState(() => _currentPage++),
+                        Opacity(
+                          opacity: _currentPage >= totalPages ? 0.35 : 1.0,
+                          child: IconButton(
+                            icon: const Icon(Icons.chevron_right, color: AppColors.accent),
+                            onPressed: _currentPage >= totalPages ? null : () => setState(() => _currentPage++),
+                          ),
                         ),
                       ],
                     ),
@@ -427,42 +433,47 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
 
   void _showJumpToPageDialog(BuildContext context, int totalPages) {
     final TextEditingController controller = TextEditingController();
+    String? errorText;
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: AppColors.surface,
-        title: const Text('Jump to Page', style: TextStyle(color: AppColors.textPrimary)),
-        content: TextField(
-          controller: controller,
-          keyboardType: TextInputType.number,
-          autofocus: true,
-          style: const TextStyle(color: AppColors.textPrimary),
-          decoration: const InputDecoration(
-            hintText: 'Enter page number',
-            hintStyle: TextStyle(color: AppColors.textSecondary),
-            enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: AppColors.accent)),
-            focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: AppColors.accent, width: 2)),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          backgroundColor: AppColors.surface,
+          title: const Text('Jump to Page', style: TextStyle(color: AppColors.textPrimary)),
+          content: TextField(
+            controller: controller,
+            keyboardType: TextInputType.number,
+            autofocus: true,
+            style: const TextStyle(color: AppColors.textPrimary),
+            decoration: InputDecoration(
+              hintText: '1 – $totalPages',
+              hintStyle: const TextStyle(color: AppColors.textSecondary),
+              errorText: errorText,
+              enabledBorder: const UnderlineInputBorder(borderSide: BorderSide(color: AppColors.accent)),
+              focusedBorder: const UnderlineInputBorder(borderSide: BorderSide(color: AppColors.accent, width: 2)),
+              errorBorder: const UnderlineInputBorder(borderSide: BorderSide(color: Colors.redAccent)),
+            ),
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary)),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final int? page = int.tryParse(controller.text);
+                if (page == null || page < 1 || page > totalPages) {
+                  setDialogState(() => errorText = 'Enter 1 – $totalPages');
+                  return;
+                }
+                setState(() => _currentPage = page);
+                Navigator.pop(context);
+              },
+              style: ElevatedButton.styleFrom(backgroundColor: AppColors.accent),
+              child: const Text('Go', style: TextStyle(color: Colors.white)),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary)),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              final int? page = int.tryParse(controller.text);
-              if (page != null) {
-                setState(() {
-                  _currentPage = page.clamp(1, totalPages);
-                });
-              }
-              Navigator.pop(context);
-            },
-            style: ElevatedButton.styleFrom(backgroundColor: AppColors.accent),
-            child: const Text('Go', style: TextStyle(color: Colors.white)),
-          ),
-        ],
       ),
     );
   }
@@ -501,7 +512,7 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
           });
         },
         contentPadding:
-            const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         leading: Container(
           width: 44,
           height: 44,
@@ -992,7 +1003,7 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
           ),
           child: DropdownButtonHideUnderline(
             child: DropdownButtonFormField<String>(
-              value: items.contains(value) ? value : items.first,
+              value: items.isEmpty ? null : (items.contains(value) ? value : items.first),
               dropdownColor: AppColors.surface,
               icon: const Icon(Icons.arrow_drop_down, color: AppColors.accent),
               decoration: const InputDecoration(border: InputBorder.none),
@@ -1179,7 +1190,7 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
       case 'Education': badgeColor = Colors.indigo; break;
       case 'Gifts': badgeColor = Colors.amber; break;
       case 'Personal Care': badgeColor = Colors.cyan; break;
-      default: badgeColor = AppColors.textSecondary;
+      default: badgeColor = const Color(0xFF64748B);
     }
 
     return Container(
@@ -1192,7 +1203,7 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
       child: Text(
         category,
         style: TextStyle(
-            color: badgeColor, fontSize: 10, fontWeight: FontWeight.bold),
+            color: badgeColor, fontSize: 11, fontWeight: FontWeight.bold),
       ),
     );
   }

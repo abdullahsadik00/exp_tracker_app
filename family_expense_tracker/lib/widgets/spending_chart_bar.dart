@@ -77,21 +77,31 @@ class _SpendingChartBarState extends State<SpendingChartBar> with SingleTickerPr
         AnimatedBuilder(
           animation: _animation,
           builder: (context, child) {
-            return Container(
-              width: 14,
-              height: 120 * _animation.value.clamp(0.05, 1.0),
-              decoration: BoxDecoration(
-                color: widget.isCurrentMonth 
-                  ? AppColors.accent 
-                  : (widget.isAboveAverage ? AppColors.debit.withOpacity(0.7) : AppColors.credit.withOpacity(0.7)),
-                borderRadius: const BorderRadius.vertical(top: Radius.circular(4)),
-                boxShadow: widget.isCurrentMonth ? [
-                  BoxShadow(
-                    color: AppColors.accent.withOpacity(0.4),
-                    blurRadius: 8,
-                    offset: const Offset(0, 2),
-                  )
-                ] : null,
+            final barHeight = 120 * _animation.value.clamp(0.05, 1.0);
+            return Tooltip(
+              message: '${widget.label}: ₹${widget.amount >= 1000 ? '${(widget.amount / 1000).toStringAsFixed(1)}k' : widget.amount.toStringAsFixed(0)}',
+              child: SizedBox(
+                width: 40,
+                height: barHeight,
+                child: Center(
+                  child: Container(
+                    width: 14,
+                    height: barHeight,
+                    decoration: BoxDecoration(
+                      color: widget.isCurrentMonth
+                        ? AppColors.accent
+                        : (widget.isAboveAverage ? AppColors.debit.withOpacity(0.7) : AppColors.credit.withOpacity(0.7)),
+                      borderRadius: const BorderRadius.vertical(top: Radius.circular(4)),
+                      boxShadow: widget.isCurrentMonth ? [
+                        BoxShadow(
+                          color: AppColors.accent.withOpacity(0.4),
+                          blurRadius: 8,
+                          offset: const Offset(0, 2),
+                        )
+                      ] : null,
+                    ),
+                  ),
+                ),
               ),
             );
           },

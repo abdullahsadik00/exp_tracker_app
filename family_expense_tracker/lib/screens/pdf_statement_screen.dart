@@ -93,17 +93,27 @@ class _PdfStatementScreenState extends State<PdfStatementScreen> {
       } else {
         // Use the new batch upload method
         int added = await _localDbService.insertTransactionsBatch(parsedTransactions);
+        final skipped = parsedTransactions.length - added;
 
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Successfully imported $added new transactions!'),
-              backgroundColor: Colors.green,
-            ),
-          );
-          // Only pop if we are not at the root
-          if (Navigator.canPop(context)) {
-            Navigator.pop(context); // Close the screen if possible
+          if (added == 0) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('No new transactions — all may already be imported.'),
+                duration: Duration(seconds: 4),
+              ),
+            );
+          } else {
+            final msg = skipped > 0
+                ? 'Imported $added transactions ($skipped duplicates skipped)'
+                : 'Successfully imported $added transactions!';
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(msg), backgroundColor: Colors.green),
+            );
+            // Only pop if we are not at the root
+            if (Navigator.canPop(context)) {
+              Navigator.pop(context);
+            }
           }
         }
       }

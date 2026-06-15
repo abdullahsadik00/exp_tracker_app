@@ -428,23 +428,27 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
               
               // Date Picker
               _buildDropdownLabel('Date'),
-              GestureDetector(
-                onTap: () => _selectDate(context),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-                  decoration: BoxDecoration(
-                    color: AppColors.surface,
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        DateFormat('dd MMM yyyy').format(_selectedDate),
-                        style: const TextStyle(color: AppColors.textPrimary, fontSize: 16),
-                      ),
-                      const Icon(Icons.calendar_today, color: AppColors.accent, size: 20),
-                    ],
+              Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: () => _selectDate(context),
+                  borderRadius: BorderRadius.circular(16),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                    decoration: BoxDecoration(
+                      color: AppColors.surface,
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          DateFormat('dd MMM yyyy').format(_selectedDate),
+                          style: const TextStyle(color: AppColors.textPrimary, fontSize: 16),
+                        ),
+                        const Icon(Icons.calendar_today, color: AppColors.accent, size: 20),
+                      ],
+                    ),
                   ),
                 ),
               ),

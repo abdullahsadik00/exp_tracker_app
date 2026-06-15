@@ -239,12 +239,12 @@ class LocalDbService {
 
     await db.transaction((txn) async {
       for (var tx in transactions) {
-        await txn.insert(
+        final rowId = await txn.insert(
           'transactions',
           tx.toJson(),
           conflictAlgorithm: ConflictAlgorithm.ignore,
         );
-        addedCount++;
+        if (rowId > 0) addedCount++;
         affectedBanks.add(tx.bankName);
       }
     });

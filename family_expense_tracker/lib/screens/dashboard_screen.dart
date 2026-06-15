@@ -159,9 +159,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ),
       ),
       floatingActionButton: FloatingActionButton(
+        tooltip: _isFetching ? 'Fetching SMS...' : 'Fetch bank SMS',
         onPressed: _isFetching ? null : _fetchAndSaveSms,
         backgroundColor: AppColors.accent,
-        child: _isFetching 
+        child: _isFetching
           ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
           : const Icon(Icons.refresh, color: Colors.white),
       ),
@@ -199,7 +200,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final currencyFormat = NumberFormat.currency(symbol: '₹', decimalDigits: 2);
 
     return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 4),
+      margin: const EdgeInsets.symmetric(horizontal: 8),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         gradient: const LinearGradient(
@@ -613,7 +614,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       case 'Transportation': badgeColor = Colors.teal; break;
       case 'Education': badgeColor = Colors.indigo; break;
       case 'Gifts': badgeColor = Colors.amber; break;
-      default: badgeColor = AppColors.textSecondary;
+      default: badgeColor = const Color(0xFF64748B);
     }
 
     return Container(
@@ -625,7 +626,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       child: Text(
         category,
         style: TextStyle(
-            color: badgeColor, fontSize: 9, fontWeight: FontWeight.bold),
+            color: badgeColor, fontSize: 11, fontWeight: FontWeight.bold),
       ),
     );
   }

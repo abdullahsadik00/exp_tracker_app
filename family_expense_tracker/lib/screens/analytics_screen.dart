@@ -75,7 +75,12 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
                   _buildYearlyTrendSection(),
                   const SizedBox(height: 32),
                   _buildChartSection(debitTotals),
-                      const SizedBox(height: 32),
+                      const SizedBox(height: 8),
+                      const Center(
+                        child: Text('Tap a segment to highlight',
+                          style: TextStyle(color: AppColors.textSecondary, fontSize: 11)),
+                      ),
+                      const SizedBox(height: 24),
                       _buildLegendSection(debitTotals),
                     ],
                     const SizedBox(height: 48),
@@ -146,15 +151,22 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
   }
 
   Widget _buildEmptyState() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: const [
-          Icon(Icons.pie_chart_outline, color: AppColors.textSecondary, size: 64),
-          SizedBox(height: 16),
-          Text('No spending data available yet', 
-            style: TextStyle(color: AppColors.textSecondary, fontSize: 16)),
-        ],
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 48),
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.pie_chart_outline, color: AppColors.textSecondary.withOpacity(0.4), size: 64),
+            const SizedBox(height: 16),
+            Text('No spending data for $_selectedMonth',
+              style: const TextStyle(color: AppColors.textSecondary, fontSize: 16, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            const Text('Add transactions or select a different month',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: AppColors.textSecondary, fontSize: 13)),
+          ],
+        ),
       ),
     );
   }
@@ -237,8 +249,8 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
             ),
           ),
         );
+        i++;
       }
-      i++;
     });
     return list;
   }
@@ -356,7 +368,19 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
     return StreamBuilder<Map<String, double>>(
       stream: _localDbService.yearlySpendingTrendStream,
       builder: (context, snapshot) {
-        if (!snapshot.hasData) return const SizedBox(height: 200, child: Center(child: CircularProgressIndicator()));
+        if (!snapshot.hasData) return const SizedBox(
+          height: 200,
+          child: Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                CircularProgressIndicator(color: AppColors.accent),
+                SizedBox(height: 12),
+                Text('Loading spending trend...', style: TextStyle(color: AppColors.textSecondary, fontSize: 13)),
+              ],
+            ),
+          ),
+        );
         
         final trend = snapshot.data!;
         final maxVal = trend.values.fold(0.0, (m, v) => v > m ? v : m);
