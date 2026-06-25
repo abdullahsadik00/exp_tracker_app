@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../models/transaction_model.dart';
 import '../services/local_db_service.dart';
+import '../services/spending_analysis_service.dart';
 import '../theme/app_colors.dart';
 
 
@@ -53,33 +54,13 @@ class _CategoryInsightsScreenState extends State<CategoryInsightsScreen> {
       monthlyTransactionsMap.putIfAbsent(monthKey, () => []).add(t);
     }
 
-    // 2. All-Time Averages and Extremas
-    if (monthlySpendMap.isNotEmpty) {
-      // Average
-      _avgMonthlySpend = monthlySpendMap.values.fold(0.0, (sum, val) => sum + val) / monthlySpendMap.length;
-
-      // Peak (Highest)
-      var peakEntry = monthlySpendMap.entries.reduce((a, b) => a.value > b.value ? a : b);
-      _peakMonthName = peakEntry.key;
-      _peakMonthAmount = peakEntry.value;
-
-      // Lowest (Ignoring ₹0 or months with no data already filtered by map inclusion)
-      var nonZeroMonths = monthlySpendMap.entries.where((e) => e.value > 0).toList();
-      if (nonZeroMonths.isNotEmpty) {
-        var lowEntry = nonZeroMonths.reduce((a, b) => a.value < b.value ? a : b);
-        _lowestMonthName = lowEntry.key;
-        _lowestMonthAmount = lowEntry.value;
-      } else {
-        _lowestMonthName = 'N/A';
-        _lowestMonthAmount = 0.0;
-      }
-    } else {
-      _avgMonthlySpend = 0.0;
-      _peakMonthName = 'N/A';
-      _peakMonthAmount = 0.0;
-      _lowestMonthName = 'N/A';
-      _lowestMonthAmount = 0.0;
-    }
+    // 2. All-Time Averages and Extremas (delegated to SpendingAnalysisService)
+    final stats = SpendingAnalysisService.calculateCategoryStats(filtered, _selectedCategory!);
+    _avgMonthlySpend = stats.averageMonthlySpend;
+    _peakMonthAmount = stats.highestMonthAmount;
+    _peakMonthName = stats.highestMonthAmount > 0 ? stats.highestMonthName : 'N/A';
+    _lowestMonthAmount = stats.lowestMonthAmount;
+    _lowestMonthName = stats.lowestMonthAmount > 0 ? stats.lowestMonthName : 'N/A';
 
     // 3. Last 6 Months Trends (for Chart)
     _last6MonthsTrends = {};
@@ -89,12 +70,10 @@ class _CategoryInsightsScreenState extends State<CategoryInsightsScreen> {
       _last6MonthsTrends[monthKey] = monthlySpendMap[monthKey] ?? 0.0;
     }
 
-    // 4. Family Split
+    // 4. Family Split (delegated to SpendingAnalysisService)
     _familySplit = {'Me': 0.0, 'Mom': 0.0, 'Dad': 0.0};
-    for (var t in filtered) {
-      if (_familySplit.containsKey(t.assignedTo)) {
-        _familySplit[t.assignedTo] = (_familySplit[t.assignedTo] ?? 0.0) + t.amount;
-      }
+    for (final share in SpendingAnalysisService.getFamilyDistribution(filtered, _selectedCategory!)) {
+      _familySplit[share.name] = share.amount;
     }
 
     // 5. Monthly Drill-Down State

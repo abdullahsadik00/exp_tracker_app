@@ -5,13 +5,8 @@ import 'screens/analytics_screen.dart';
 import 'screens/add_transaction_screen.dart';
 import 'theme/app_colors.dart';
 
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  
-  debugPrint('---------------------------------------------------------');
-  debugPrint('NOTICE: Offline SQLite Database Initialized.');
-  debugPrint('---------------------------------------------------------');
-  
   runApp(const MyApp());
 }
 
@@ -84,20 +79,6 @@ class _MainScreenState extends State<MainScreen> {
           ),
         ],
       ),
-    );
-  }
-}
-
-
-
-
-class SettingsScreen extends StatelessWidget {
-  const SettingsScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Center(child: Text('Settings Screen')),
     );
   }
 }

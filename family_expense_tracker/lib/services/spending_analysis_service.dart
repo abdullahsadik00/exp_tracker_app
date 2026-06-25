@@ -104,7 +104,7 @@ class SpendingAnalysisService {
     
     final catTxns = transactions.where((t) => t.category == category && t.type == 'debit').toList();
 
-    for (int i =  cycle(11); i >= 0; i--) {
+    for (int i = 11; i >= 0; i--) {
       final date = DateTime(now.year, now.month - i, 1);
       final key = DateFormat('yyyy-MM').format(date);
       final monthName = DateFormat('MMM').format(date);
@@ -121,9 +121,6 @@ class SpendingAnalysisService {
     }
     return trend;
   }
-  
-  // Helper for cycle-like iteration (not a native dart function, just logic here)
-  static int cycle(int val) => val; 
 
   /// Calculates family member distribution for the category.
   static List<MemberShare> getFamilyDistribution(List<TransactionModel> transactions, String category) {

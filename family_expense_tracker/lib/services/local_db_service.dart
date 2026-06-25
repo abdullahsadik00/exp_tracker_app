@@ -363,8 +363,8 @@ class LocalDbService {
         SUM(CASE WHEN type = 'credit' THEN amount ELSE 0 END) as income,
         SUM(CASE WHEN type = 'debit' THEN amount ELSE 0 END) as expense
       FROM transactions
-      WHERE date LIKE '$monthStr%' AND (is_transfer IS NULL OR is_transfer != 1)
-    ''');
+      WHERE date LIKE ? AND (is_transfer IS NULL OR is_transfer != 1)
+    ''', ['$monthStr%']);
     stats['total_income'] = (monthTotals.first['income'] as num?)?.toDouble() ?? 0.0;
     stats['total_expense'] = (monthTotals.first['expense'] as num?)?.toDouble() ?? 0.0;
 
@@ -372,10 +372,10 @@ class LocalDbService {
     final personFlows = await db.rawQuery('''
       SELECT assignedTo, SUM(CASE WHEN type = 'credit' THEN amount ELSE -amount END) as flow
       FROM transactions
-      WHERE date LIKE '$monthStr%' AND assignedTo IN ('Mom', 'Dad')
+      WHERE date LIKE ? AND assignedTo IN ('Mom', 'Dad')
         AND (is_transfer IS NULL OR is_transfer != 1)
       GROUP BY assignedTo
-    ''');
+    ''', ['$monthStr%']);
     for (var row in personFlows) {
       if (row['assignedTo'] == 'Mom') stats['mom_flow'] = (row['flow'] as num?)?.toDouble() ?? 0.0;
       if (row['assignedTo'] == 'Dad') stats['dad_flow'] = (row['flow'] as num?)?.toDouble() ?? 0.0;
@@ -385,10 +385,10 @@ class LocalDbService {
     final bankFlows = await db.rawQuery('''
       SELECT bankName, type, SUM(amount) as total
       FROM transactions
-      WHERE date LIKE '$monthStr%' AND assignedTo = 'Me' AND bankName IN ('SBI', 'BoB')
+      WHERE date LIKE ? AND assignedTo = 'Me' AND bankName IN ('SBI', 'BoB')
         AND (is_transfer IS NULL OR is_transfer != 1)
       GROUP BY bankName, type
-    ''');
+    ''', ['$monthStr%']);
     for (var row in bankFlows) {
       final bank = row['bankName'];
       final type = row['type'];
@@ -562,10 +562,10 @@ class LocalDbService {
     final List<Map<String, dynamic>> spending = await db.rawQuery('''
       SELECT category, SUM(amount) as total
       FROM transactions
-      WHERE date LIKE '$monthStr%' AND type = 'debit'
+      WHERE date LIKE ? AND type = 'debit'
         AND (is_transfer IS NULL OR is_transfer != 1)
       GROUP BY category
-    ''');
+    ''', ['$monthStr%']);
 
     Map<String, double> spendingMap = {
       for (var row in spending) row['category'] as String: (row['total'] as num).toDouble()
@@ -621,10 +621,10 @@ class LocalDbService {
     final currentRows = await db.rawQuery('''
       SELECT category, SUM(amount) as current_amount
       FROM transactions
-      WHERE type = 'debit' AND date LIKE '$monthStr%'
+      WHERE type = 'debit' AND date LIKE ?
         AND (is_transfer IS NULL OR is_transfer != 1)
       GROUP BY category
-    ''');
+    ''', ['$monthStr%']);
 
     final avgRows = await db.rawQuery('''
       SELECT category, AVG(monthly) as avg_amount FROM (
@@ -632,12 +632,12 @@ class LocalDbService {
         FROM transactions
         WHERE type = 'debit'
           AND date >= date('now', '-4 months')
-          AND strftime('%Y-%m', date) != '$monthStr'
+          AND strftime('%Y-%m', date) != ?
           AND (is_transfer IS NULL OR is_transfer != 1)
         GROUP BY category, m
       )
       GROUP BY category
-    ''');
+    ''', [monthStr]);
 
     final avgMap = <String, double>{
       for (final r in avgRows)
@@ -673,9 +673,9 @@ class LocalDbService {
     final result = await db.rawQuery('''
       SELECT SUM(amount) as current_spend
       FROM transactions
-      WHERE type = 'debit' AND date LIKE '$monthStr%'
+      WHERE type = 'debit' AND date LIKE ?
         AND (is_transfer IS NULL OR is_transfer != 1)
-    ''');
+    ''', ['$monthStr%']);
     final currentSpend = (result.first['current_spend'] as num?)?.toDouble() ?? 0.0;
     final forecastedSpend = daysElapsed > 0 ? (currentSpend / daysElapsed) * totalDays : 0.0;
 
@@ -778,9 +778,9 @@ class LocalDbService {
       
       final result = await db.rawQuery('''
         SELECT SUM(amount) as total FROM transactions
-        WHERE date LIKE '$monthStr%' AND type = 'debit'
+        WHERE date LIKE ? AND type = 'debit'
           AND (is_transfer IS NULL OR is_transfer != 1)
-      ''');
+      ''', ['$monthStr%']);
       
       trend[monthKey] = (result.first['total'] as num?)?.toDouble() ?? 0.0;
     }
@@ -902,7 +902,21 @@ class LocalDbService {
   
   // Bulk Update Bank
   Future<void> bulkUpdateBank(Set<String> txIds, String newBank) async {
+    if (txIds.isEmpty) return;
     final db = await database;
+
+    // Capture the banks these transactions currently belong to, so their
+    // running-balance ledgers are re-synced too (not just the destination bank).
+    final placeholders = txIds.map((_) => '?').join(',');
+    final oldRows = await db.query(
+      'transactions',
+      columns: ['bankName'],
+      where: 'bankName IS NOT NULL AND id IN ($placeholders)',
+      whereArgs: txIds.toList(),
+    );
+    final Set<String> affectedBanks =
+        oldRows.map((m) => m['bankName'] as String).toSet()..add(newBank);
+
     await db.transaction((txn) async {
       for (var id in txIds) {
         await txn.update(
@@ -913,7 +927,10 @@ class LocalDbService {
         );
       }
     });
-    await syncLedgerBalances(newBank);
+
+    for (final bank in affectedBanks) {
+      await syncLedgerBalances(bank);
+    }
     notifyChange();
   }
 

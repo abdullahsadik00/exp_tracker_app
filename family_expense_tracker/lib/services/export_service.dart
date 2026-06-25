@@ -28,8 +28,8 @@ class ExportService {
         ]);
       }
 
-      // Convert using Csv().encode (csv 8.0.0+ syntax)
-      String csvData = Csv().encode(rows);
+      // Convert rows to a CSV string (csv package API)
+      String csvData = const ListToCsvConverter().convert(rows);
       
       final directory = await getApplicationDocumentsDirectory();
       final path = "${directory.path}/transactions_export.csv";

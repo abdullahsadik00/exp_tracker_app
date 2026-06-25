@@ -7,6 +7,7 @@ import 'categorization_rules_screen.dart';
 import 'transfer_review_screen.dart';
 import 'pdf_statement_screen.dart';
 import 'transactions_screen.dart';
+import '../services/export_service.dart';
 
 import '../theme/app_colors.dart';
 import 'package:intl/intl.dart';
@@ -91,7 +92,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
           PopupMenuButton<String>(
             onSelected: (value) async {
-              if (value == 'rules') {
+              if (value == 'export') {
+                final txns = await _localDbService.getAllTransactions();
+                if (txns.isEmpty) {
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('No transactions to export')),
+                    );
+                  }
+                  return;
+                }
+                try {
+                  await ExportService.exportTransactions(txns);
+                } catch (e) {
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Export failed: $e')),
+                    );
+                  }
+                }
+              } else if (value == 'rules') {
                 Navigator.push(context,
                     MaterialPageRoute(builder: (_) => const CategorizationRulesScreen()));
               } else if (value == 'backup') {
@@ -118,6 +138,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             },
             icon: const Icon(Icons.more_vert, color: AppColors.textPrimary),
             itemBuilder: (context) => [
+              const PopupMenuItem(value: 'export',  child: Text('Export to CSV', style: TextStyle(color: AppColors.textPrimary))),
               const PopupMenuItem(value: 'rules',   child: Text('Auto-Categorization Rules', style: TextStyle(color: AppColors.textPrimary))),
               const PopupMenuItem(value: 'backup',  child: Text('Backup Data',  style: TextStyle(color: AppColors.textPrimary))),
               const PopupMenuItem(value: 'restore', child: Text('Restore Data', style: TextStyle(color: AppColors.textPrimary))),
