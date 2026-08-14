@@ -74,6 +74,10 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
           date: _selectedDate,
           rawSmsText: description.isEmpty ? 'Transfer to $_toBank' : description,
           description: description.isEmpty ? 'Transfer to $_toBank' : description,
+          // Both legs are marked as a confirmed transfer so the monthly
+          // income/expense figures do not count moving your own money as
+          // both earning and spending it.
+          isTransfer: 1,
         ));
         
         // Credit to destination
@@ -87,6 +91,7 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
           date: _selectedDate,
           rawSmsText: description.isEmpty ? 'Transfer from $_fromBank' : description,
           description: description.isEmpty ? 'Transfer from $_fromBank' : description,
+          isTransfer: 1,
         ));
       } else {
         transactions.add(TransactionModel(

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/local_db_service.dart';
 import '../models/transaction_model.dart';
+import '../utils/money.dart';
 
 import 'add_transaction_screen.dart';
 import '../theme/app_colors.dart';
@@ -494,6 +495,21 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
     );
   }
 
+  static String _sourceLabel(String source) {
+    switch (source) {
+      case TxnSource.sms:
+        return 'Imported from SMS';
+      case TxnSource.pdf:
+        return 'Imported from PDF statement';
+      case TxnSource.excel:
+        return 'Imported from Excel statement';
+      case TxnSource.restore:
+        return 'Restored from backup';
+      default:
+        return 'Added manually';
+    }
+  }
+
   Widget _buildTransactionTile(TransactionModel txn, {Key? key}) {
     final isCredit = txn.type == 'credit';
     final amountColor = isCredit ? AppColors.credit : AppColors.debit;
@@ -555,6 +571,42 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                 maxLines: 1,
               ),
             ),
+            if (txn.needsReview)
+              Tooltip(
+                message: txn.reviewReason ?? 'Needs review',
+                child: const Padding(
+                  padding: EdgeInsets.only(right: 6),
+                  child: Icon(Icons.help_outline_rounded,
+                      size: 14, color: Colors.orangeAccent),
+                ),
+              ),
+            if (txn.status == TxnStatus.failed)
+              const Tooltip(
+                message: 'Failed or declined — not counted in the balance',
+                child: Padding(
+                  padding: EdgeInsets.only(right: 6),
+                  child: Icon(Icons.block_rounded,
+                      size: 14, color: AppColors.debit),
+                ),
+              ),
+            if (txn.source == TxnSource.sms)
+              const Tooltip(
+                message: 'Imported automatically from SMS',
+                child: Padding(
+                  padding: EdgeInsets.only(right: 6),
+                  child: Icon(Icons.sms_outlined,
+                      size: 13, color: AppColors.textSecondary),
+                ),
+              ),
+            if (txn.source == TxnSource.pdf || txn.source == TxnSource.excel)
+              const Tooltip(
+                message: 'Imported from a statement file',
+                child: Padding(
+                  padding: EdgeInsets.only(right: 6),
+                  child: Icon(Icons.description_outlined,
+                      size: 13, color: AppColors.textSecondary),
+                ),
+              ),
             if (txn.isTransfer == 1)
               Tooltip(
                 message: 'Confirmed transfer — excluded from spending',
@@ -640,7 +692,13 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
     
     final TextEditingController notesController = TextEditingController(text: txn.notes ?? '');
     final TextEditingController amountController = TextEditingController(text: txn.amount.toStringAsFixed(2));
-    final TextEditingController balanceController = TextEditingController(text: txn.closingBalance?.toStringAsFixed(2) ?? '');
+    // Seeded from the bank-reported figure, not the app's derived ledger.
+    // syncLedgerBalances recomputes closingBalance on every change, so anything
+    // typed into it used to be silently overwritten.
+    final TextEditingController balanceController = TextEditingController(
+        text: txn.smsBalancePaise == null
+            ? ''
+            : Money.toDouble(txn.smsBalancePaise!).toStringAsFixed(2));
     bool isSaving = false;
 
     // Local state for the bottom sheet
@@ -731,7 +789,7 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                         textAlign: TextAlign.center,
                         style: const TextStyle(fontSize: 16, color: AppColors.textSecondary, fontWeight: FontWeight.w600),
                         decoration: InputDecoration(
-                          prefixText: 'Closing Balance: ₹',
+                          prefixText: 'Bank-reported Balance: ₹',
                           prefixStyle: const TextStyle(color: AppColors.textSecondary, fontSize: 16, fontWeight: FontWeight.w600),
                           border: InputBorder.none,
                           hintText: '0.00',
@@ -797,6 +855,56 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                             child: Divider(color: Colors.white10),
                           ),
                           _buildInfoRow('Time', timeFormat.format(txn.date), Icons.access_time_rounded),
+                          const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 12),
+                            child: Divider(color: Colors.white10),
+                          ),
+                          _buildInfoRow('Source', _sourceLabel(txn.source),
+                              Icons.input_rounded),
+                          if (txn.accountTail != null) ...[
+                            const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 12),
+                              child: Divider(color: Colors.white10),
+                            ),
+                            _buildInfoRow('Account', '••••${txn.accountTail}',
+                                Icons.credit_card_outlined),
+                          ],
+                          if (txn.upiTransactionId != null ||
+                              txn.referenceId != null) ...[
+                            const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 12),
+                              child: Divider(color: Colors.white10),
+                            ),
+                            _buildInfoRow(
+                                txn.upiTransactionId != null
+                                    ? 'UPI reference'
+                                    : 'Bank reference',
+                                txn.upiTransactionId ?? txn.referenceId!,
+                                Icons.tag_rounded),
+                          ],
+                          if (txn.smsBalancePaise != null) ...[
+                            const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 12),
+                              child: Divider(color: Colors.white10),
+                            ),
+                            _buildInfoRow(
+                                'Bank-reported balance',
+                                NumberFormat.currency(symbol: '₹', decimalDigits: 2)
+                                    .format(Money.toDouble(txn.smsBalancePaise!)),
+                                Icons.account_balance_wallet_outlined),
+                          ],
+                          if (txn.status != TxnStatus.posted) ...[
+                            const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 12),
+                              child: Divider(color: Colors.white10),
+                            ),
+                            _buildInfoRow(
+                                'Status',
+                                txn.status == TxnStatus.failed
+                                    ? 'Failed — not counted in balance'
+                                    : 'Pending',
+                                Icons.info_outline_rounded),
+                          ],
                         ],
                       ),
                     ),
@@ -903,8 +1011,8 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                                     assignedTo: selectedAssignedTo,
                                     bankName: selectedBank,
                                     notes: notesController.text,
-                                    amount: double.tryParse(amountController.text) ?? txn.amount,
-                                    closingBalance: double.tryParse(balanceController.text),
+                                    amountPaise: Money.parsePaise(amountController.text) ?? txn.amountPaise,
+                                    smsBalancePaise: Money.parsePaise(balanceController.text),
                                   ),
                                 );
                                 FocusScope.of(context).unfocus();
