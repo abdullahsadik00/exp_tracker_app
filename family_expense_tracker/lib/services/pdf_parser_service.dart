@@ -1,5 +1,6 @@
 import 'package:intl/intl.dart';
 import '../models/transaction_model.dart';
+import '../utils/money.dart';
 import 'categorization_service.dart';
 import 'local_db_service.dart';
 
@@ -55,9 +56,13 @@ class PdfParserService {
 
             final analysis = categorizer.analyzeTransaction(trimmedLine, type);
 
+            // id and fingerprint are assigned by LocalDbService, which knows
+            // how many identical rows this batch already contains. Leaving the
+            // id blank here is safe now; it previously meant every row after
+            // the first collided on the primary key and was silently dropped.
             parsedTransactions.add(TransactionModel(
-              id: '', // ID will be assigned by the database service
-              amount: parsedAmount,
+              id: '',
+              amountPaise: Money.parsePaise(amountStr) ?? 0,
               type: type,
               bankName: analysis['bankName']!,
               assignedTo: analysis['assignedTo']!,
@@ -65,12 +70,27 @@ class PdfParserService {
               description: analysis['description']!,
               date: parsedDate,
               rawSmsText: trimmedLine,
+              source: TxnSource.pdf,
+              referenceId: _referenceFrom(trimmedLine),
             ));
           }
         }
       }
     }
     return parsedTransactions;
+  }
+
+  /// Statement rows usually carry the same reference the SMS did. Extracting
+  /// it lets a statement import recognise transactions already imported from
+  /// SMS instead of duplicating them.
+  static final RegExp _refRegex = RegExp(
+      r'(?:ref(?:erence)?\s*(?:no|id)?\.?[:\s-]*|utr[:\s-]*)([A-Za-z0-9]{6,25})',
+      caseSensitive: false);
+
+  static String? _referenceFrom(String line) {
+    final v = _refRegex.firstMatch(line)?.group(1);
+    if (v == null || !RegExp(r'\d').hasMatch(v)) return null;
+    return v.toUpperCase();
   }
 
   /// Helper to parse bank-format dates with multiple format variations

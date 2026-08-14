@@ -2,6 +2,7 @@ import 'package:excel/excel.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter/foundation.dart';
 import '../models/transaction_model.dart';
+import '../utils/money.dart';
 import 'categorization_service.dart';
 import 'local_db_service.dart';
 
@@ -84,8 +85,13 @@ class ExcelParserService {
           
           var analysis = categorizer.analyzeTransaction(description, type);
           
+          // The id used to be derived from DateTime.now(), which meant
+          // re-importing the same spreadsheet produced brand-new ids and
+          // duplicated every row. Identity is now the content fingerprint
+          // LocalDbService computes, so a re-import is a no-op.
           transactions.add(TransactionModel(
-            id: '${DateTime.now().millisecondsSinceEpoch}_${transactions.length}',
+            id: '',
+            source: TxnSource.excel,
             amount: amount,
             type: type,
             bankName: analysis['bankName'] ?? 'SBI',
@@ -94,7 +100,12 @@ class ExcelParserService {
             description: analysis['description'] ?? (description.isEmpty ? 'No Details' : description),
             date: date,
             rawSmsText: 'Excel Isol: ${raw['rawRow']}',
-            closingBalance: balance,
+            // The statement's balance column is what the *bank* says, so it
+            // becomes a reconciliation anchor rather than being written into
+            // closingBalance — that column is the app's own derived ledger and
+            // syncLedgerBalances overwrites it on every change.
+            smsBalancePaise:
+                balance == null ? null : Money.fromDouble(balance),
           ));
         }
         

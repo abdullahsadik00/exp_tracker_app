@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
-import '../services/sms_service.dart';
 import '../services/local_db_service.dart';
+import '../services/transaction_import_service.dart';
 import '../models/transaction_model.dart';
 import 'add_transaction_screen.dart';
 import 'categorization_rules_screen.dart';
 import 'transfer_review_screen.dart';
 import 'pdf_statement_screen.dart';
+import 'sms_sync_screen.dart';
 import 'transactions_screen.dart';
 import '../services/export_service.dart';
 
@@ -22,7 +23,7 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
-  final SmsService _smsService = SmsService();
+  final TransactionImportService _importer = TransactionImportService();
   final LocalDbService _localDbService = LocalDbService();
   final PageController _pageController = PageController(viewportFraction: 0.9);
   bool _isFetching = false;
@@ -30,17 +31,38 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Future<void> _fetchAndSaveSms() async {
     setState(() => _isFetching = true);
     try {
-      await _smsService.requestSmsPermission();
-      final transactions = await _smsService.fetchBankMessages();
-      
-      int newCount = transactions.length;
-      await _localDbService.insertTransactionsBatch(transactions);
+      final report = await _importer.sync();
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Fetched $newCount transactions from SMS')),
-        );
+      if (!mounted) return;
+
+      // Report what actually happened. The old message printed the number of
+      // messages parsed, which was the same every time and told the user
+      // nothing about whether anything was added.
+      final String message;
+      if (report.permissionDenied) {
+        message = 'SMS permission is required to import transactions.';
+      } else if (report.error != null) {
+        message = 'Sync failed: ${report.error}';
+      } else {
+        final parts = <String>['${report.imported} imported'];
+        if (report.duplicates > 0) parts.add('${report.duplicates} already present');
+        if (report.unparsed > 0) parts.add('${report.unparsed} unreadable');
+        if (report.flaggedForReview > 0) {
+          parts.add('${report.flaggedForReview} to review');
+        }
+        message = parts.join(' · ');
       }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(message),
+          action: SnackBarAction(
+            label: 'Details',
+            onPressed: () => Navigator.push(context,
+                MaterialPageRoute(builder: (_) => const SmsSyncScreen())),
+          ),
+        ),
+      );
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -92,25 +114,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
           PopupMenuButton<String>(
             onSelected: (value) async {
-              if (value == 'export') {
-                final txns = await _localDbService.getAllTransactions();
-                if (txns.isEmpty) {
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('No transactions to export')),
-                    );
-                  }
-                  return;
-                }
-                try {
-                  await ExportService.exportTransactions(txns);
-                } catch (e) {
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('Export failed: $e')),
-                    );
-                  }
-                }
+              if (value == 'sync') {
+                Navigator.push(context,
+                    MaterialPageRoute(builder: (_) => const SmsSyncScreen()));
               } else if (value == 'rules') {
                 Navigator.push(context,
                     MaterialPageRoute(builder: (_) => const CategorizationRulesScreen()));
@@ -138,7 +144,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             },
             icon: const Icon(Icons.more_vert, color: AppColors.textPrimary),
             itemBuilder: (context) => [
-              const PopupMenuItem(value: 'export',  child: Text('Export to CSV', style: TextStyle(color: AppColors.textPrimary))),
+              const PopupMenuItem(value: 'sync',    child: Text('SMS Sync & Reconciliation', style: TextStyle(color: AppColors.textPrimary))),
               const PopupMenuItem(value: 'rules',   child: Text('Auto-Categorization Rules', style: TextStyle(color: AppColors.textPrimary))),
               const PopupMenuItem(value: 'backup',  child: Text('Backup Data',  style: TextStyle(color: AppColors.textPrimary))),
               const PopupMenuItem(value: 'restore', child: Text('Restore Data', style: TextStyle(color: AppColors.textPrimary))),
@@ -238,7 +244,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Total Balance (All-Time)', style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600)),
+          Row(
+            children: [
+              const Text('Total Balance (All-Time)', style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600)),
+              const SizedBox(width: 8),
+              _buildReconciliationChip(),
+            ],
+          ),
           const SizedBox(height: 4),
           Text(currencyFormat.format(balance),
             style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
@@ -254,6 +266,55 @@ class _DashboardScreenState extends State<DashboardScreen> {
           )
         ],
       ),
+    );
+  }
+
+  /// Small badge telling the user whether the derived balance currently agrees
+  /// with the last balance the bank reported by SMS. Tapping it opens the
+  /// reconciliation view — the number itself is never adjusted to match.
+  Widget _buildReconciliationChip() {
+    return StreamBuilder<List<ReconciliationResult>>(
+      stream: _localDbService.reconciliationStream,
+      builder: (context, snapshot) {
+        final results = snapshot.data;
+        if (results == null || results.isEmpty) return const SizedBox.shrink();
+
+        final comparable = results.where((r) => r.canCompare).toList();
+        if (comparable.isEmpty) return const SizedBox.shrink();
+
+        final mismatched = comparable.where((r) => !r.isReconciled).toList();
+        final ok = mismatched.isEmpty;
+
+        return GestureDetector(
+          onTap: () => Navigator.push(context,
+              MaterialPageRoute(builder: (_) => const SmsSyncScreen())),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+            decoration: BoxDecoration(
+              color: (ok ? AppColors.credit : Colors.orangeAccent)
+                  .withOpacity(0.25),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(ok ? Icons.check_circle : Icons.error_outline,
+                    size: 11,
+                    color: ok ? AppColors.credit : Colors.orangeAccent),
+                const SizedBox(width: 4),
+                Text(
+                  ok ? 'Reconciled' : '${mismatched.length} mismatch',
+                  style: TextStyle(
+                    color: ok ? AppColors.credit : Colors.orangeAccent,
+                    fontSize: 9,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 

@@ -5,7 +5,11 @@ import 'package:sqflite/sqflite.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import '../models/transaction_model.dart';
+import '../utils/money.dart';
+import '../utils/stable_hash.dart';
 import 'categorization_service.dart';
+import 'sms_parser.dart';
+import 'transaction_fingerprint.dart';
 import 'dart:async';
 import 'package:intl/intl.dart';
 
@@ -17,11 +21,41 @@ class LocalDbService {
   static LocalDbService get instance => _instance;
 
   static Database? _database;
+  static Completer<Database>? _opening;
 
+  /// SQL predicate shared by every balance-affecting aggregate. Failed and
+  /// declined transactions are kept for audit but must never move the balance;
+  /// expressing that rule in one constant is what keeps the many aggregate
+  /// queries from drifting apart.
+  static const String notFailed = "(status IS NULL OR status != 'failed')";
+
+  static const String notTransfer = '(is_transfer IS NULL OR is_transfer != 1)';
+
+  /// Opening the database is guarded so that two widgets building at the same
+  /// time cannot each run `_initDb` and race the migration.
   Future<Database> get database async {
     if (_database != null) return _database!;
-    _database = await _initDb();
-    return _database!;
+    if (_opening != null) return _opening!.future;
+
+    final completer = Completer<Database>();
+    _opening = completer;
+    try {
+      final db = await _initDb();
+      _database = db;
+      completer.complete(db);
+    } catch (e, st) {
+      _opening = null;
+      completer.completeError(e, st);
+    }
+    return completer.future;
+  }
+
+  /// Closes and forgets the open database. Test-only: the service is a
+  /// singleton with static state, so each test needs a clean slate.
+  Future<void> resetForTesting() async {
+    await _database?.close();
+    _database = null;
+    _opening = null;
   }
 
   Future<Database> _initDb() async {
@@ -30,12 +64,13 @@ class LocalDbService {
 
     return await openDatabase(
       path,
-      version: 5,
+      version: 6,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE transactions (
             id TEXT PRIMARY KEY,
             amount REAL,
+            amount_paise INTEGER,
             type TEXT,
             bankName TEXT,
             assignedTo TEXT,
@@ -45,11 +80,27 @@ class LocalDbService {
             description TEXT,
             closingBalance REAL,
             notes TEXT,
-            is_transfer INTEGER DEFAULT 0
+            is_transfer INTEGER DEFAULT 0,
+            source TEXT DEFAULT 'manual',
+            fingerprint TEXT,
+            merchant TEXT,
+            reference_id TEXT,
+            upi_txn_id TEXT,
+            account_tail TEXT,
+            sms_sender TEXT,
+            status TEXT DEFAULT 'posted',
+            txn_kind TEXT DEFAULT 'normal',
+            needs_review INTEGER DEFAULT 0,
+            review_reason TEXT,
+            sms_balance_paise INTEGER,
+            created_at TEXT,
+            updated_at TEXT
           )
         ''');
         await db.execute('CREATE INDEX idx_date ON transactions (date)');
         await db.execute('CREATE INDEX idx_bank ON transactions (bankName)');
+        await _createV6Objects(db);
+        await _createFingerprintIndex(db);
         await db.execute('''
           CREATE TABLE budgets(
             category TEXT PRIMARY KEY,
@@ -102,8 +153,274 @@ class LocalDbService {
           await db.execute(
             "UPDATE transactions SET is_transfer = 1 WHERE category = 'Transfer'");
         }
+        if (oldVersion < 6) {
+          await _migrateToV6(db);
+        }
       },
     );
+  }
+
+  // ─── Schema v6: provenance, deduplication and reconciliation ───────────────
+
+  static const List<List<String>> _v6Columns = [
+    ['amount_paise', 'INTEGER'],
+    ['source', "TEXT DEFAULT 'manual'"],
+    ['fingerprint', 'TEXT'],
+    ['merchant', 'TEXT'],
+    ['reference_id', 'TEXT'],
+    ['upi_txn_id', 'TEXT'],
+    ['account_tail', 'TEXT'],
+    ['sms_sender', 'TEXT'],
+    ['status', "TEXT DEFAULT 'posted'"],
+    ['txn_kind', "TEXT DEFAULT 'normal'"],
+    ['needs_review', 'INTEGER DEFAULT 0'],
+    ['review_reason', 'TEXT'],
+    ['sms_balance_paise', 'INTEGER'],
+    ['created_at', 'TEXT'],
+    ['updated_at', 'TEXT'],
+  ];
+
+  /// Tables and indexes introduced in v6. Shared by `onCreate` and `onUpgrade`
+  /// so a fresh install and an upgraded install can never diverge.
+  static Future<void> _createV6Objects(Database db) async {
+    // Tombstones. Without these, deleting an SMS-imported transaction is
+    // pointless: the next sync re-reads the same message and puts it straight
+    // back. The fingerprint outlives the row.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS deleted_fingerprints(
+        fingerprint TEXT PRIMARY KEY,
+        deleted_at TEXT,
+        note TEXT
+      )
+    ''');
+
+    // Audit trail for every message the importer looked at, including the ones
+    // it refused. "Nothing imported" must always be explainable.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS sms_import_log(
+        sms_hash TEXT PRIMARY KEY,
+        sender TEXT,
+        body TEXT,
+        received_at TEXT,
+        outcome TEXT,
+        reason TEXT,
+        txn_id TEXT,
+        logged_at TEXT
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS sync_state(
+        key TEXT PRIMARY KEY,
+        value TEXT
+      )
+    ''');
+
+    // Opening balance per account, so the derived balance can be compared with
+    // a real bank figure instead of always starting from zero.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS accounts(
+        bank_name TEXT PRIMARY KEY,
+        account_tail TEXT,
+        opening_balance_paise INTEGER DEFAULT 0,
+        opening_date TEXT,
+        updated_at TEXT
+      )
+    ''');
+
+    // Rows removed by the de-duplication pass are archived rather than dropped,
+    // so a bad merge is always recoverable.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS merged_duplicates(
+        id TEXT,
+        fingerprint TEXT,
+        payload TEXT,
+        merged_at TEXT
+      )
+    ''');
+
+    await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_txn_status ON transactions (status)');
+    await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_txn_source ON transactions (source)');
+    // The unique fingerprint index is deliberately NOT created here. On an
+    // upgrade this runs before the backfill, and the backfill's UPDATEs would
+    // hit the constraint the moment two existing rows resolved to the same
+    // fingerprint — which is exactly the case the migration exists to clean up.
+    // Callers create it once the data is known to be unique.
+  }
+
+  /// The constraint that makes de-duplication a guarantee rather than a
+  /// convention: no two rows may share a fingerprint. SQLite permits multiple
+  /// NULLs, so rows that predate fingerprinting do not block it.
+  static Future<void> _createFingerprintIndex(Database db) async {
+    await db.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_txn_fingerprint '
+        'ON transactions (fingerprint)');
+  }
+
+  static Future<void> _migrateToV6(Database db) async {
+    final existing = await db.rawQuery('PRAGMA table_info(transactions)');
+    final present = existing.map((c) => c['name'] as String).toSet();
+
+    for (final col in _v6Columns) {
+      if (present.contains(col[0])) continue;
+      await db.execute('ALTER TABLE transactions ADD COLUMN ${col[0]} ${col[1]}');
+    }
+
+    // Move money onto the integer rail. ROUND before CAST because CAST
+    // truncates and 8.2 * 100 is 819.9999999999999 in IEEE-754.
+    await db.execute(
+        'UPDATE transactions SET amount_paise = CAST(ROUND(amount * 100) AS INTEGER) '
+        'WHERE amount_paise IS NULL');
+
+    await db.execute("UPDATE transactions SET status = 'posted' WHERE status IS NULL");
+    await db.execute("UPDATE transactions SET txn_kind = 'normal' WHERE txn_kind IS NULL");
+    await db.execute('UPDATE transactions SET needs_review = 0 WHERE needs_review IS NULL');
+    await db.execute('UPDATE transactions SET created_at = date WHERE created_at IS NULL');
+    await db.execute('UPDATE transactions SET updated_at = date WHERE updated_at IS NULL');
+
+    // Recover provenance from the id shapes the old code generated. This runs
+    // over every row rather than only NULL ones, because `ADD COLUMN ... DEFAULT
+    // 'manual'` has already backfilled the column — filtering on NULL here
+    // would silently label every historic SMS import as manual. The CASE is
+    // deterministic, so re-running it after an interrupted upgrade is a no-op.
+    await db.execute('''
+      UPDATE transactions SET source = CASE
+        WHEN id LIKE 'sms\\_%' ESCAPE '\\' THEN 'sms'
+        WHEN rawSmsText LIKE 'Excel Isol:%' THEN 'excel'
+        ELSE 'manual'
+      END
+    ''');
+
+    await _createV6Objects(db);
+    await _backfillFingerprints(db);
+    await _dedupeByFingerprint(db);
+
+    // Only now is the column guaranteed unique, so the index can be enforced.
+    await _createFingerprintIndex(db);
+  }
+
+  /// Gives every pre-existing row a fingerprint.
+  ///
+  /// This is the step that makes the first sync after upgrading safe: SMS rows
+  /// are re-parsed from their stored body so they carry the same UPI/reference
+  /// identity the importer will compute for the very same message, and are
+  /// therefore recognised as already present instead of imported again.
+  static Future<void> _backfillFingerprints(Database db) async {
+    final rows = await db.query('transactions',
+        columns: [
+          'id', 'amount_paise', 'type', 'bankName', 'date', 'rawSmsText',
+          'description', 'source', 'fingerprint',
+        ],
+        where: 'fingerprint IS NULL');
+    if (rows.isEmpty) return;
+
+    const parser = SmsParser();
+    final batch = db.batch();
+    // Counts identical field-tuples so genuinely duplicated statement rows keep
+    // distinct fingerprints instead of being merged into one.
+    final occurrences = <String, int>{};
+
+    for (final row in rows) {
+      final id = row['id'] as String? ?? '';
+      final paise = (row['amount_paise'] as num?)?.toInt() ?? 0;
+      final type = (row['type'] as String?) ?? 'debit';
+      final bank = (row['bankName'] as String?) ?? 'SBI';
+      final date = DateTime.tryParse((row['date'] ?? '').toString()) ??
+          DateTime.fromMillisecondsSinceEpoch(0);
+      final raw = (row['rawSmsText'] as String?) ?? '';
+      final description = (row['description'] as String?) ?? '';
+      final source = (row['source'] as String?) ?? TxnSource.manual;
+      final isSms = source == TxnSource.sms;
+
+      String? refId;
+      String? upiId;
+      String? tail;
+      if (isSms && raw.isNotEmpty) {
+        final parsed = parser.parse(body: raw, receivedAt: date);
+        refId = parsed.referenceId;
+        upiId = parsed.upiTransactionId;
+        tail = parsed.accountTail;
+      }
+
+      final key = '$bank|$type|$paise|${date.toIso8601String()}|$description';
+      final occurrence = occurrences[key] ?? 0;
+      occurrences[key] = occurrence + 1;
+
+      final fp = TransactionFingerprint.build(
+        bank: bank,
+        type: type,
+        amountPaise: paise,
+        dateTime: date,
+        referenceId: refId,
+        upiTransactionId: upiId,
+        accountTail: tail,
+        rawText: raw,
+        description: description,
+        allowBodyHash: isSms,
+        occurrence: occurrence,
+      );
+
+      batch.update('transactions', {
+        'fingerprint': fp,
+        'reference_id': refId,
+        'upi_txn_id': upiId,
+        'account_tail': tail,
+      }, where: 'id = ?', whereArgs: [id]);
+    }
+
+    await batch.commit(noResult: true);
+  }
+
+  /// Collapses rows that share a fingerprint, keeping the one that carries the
+  /// most human curation.
+  ///
+  /// Losers are archived to `merged_duplicates` first — this runs unattended
+  /// during an upgrade, so it must be reversible.
+  static Future<void> _dedupeByFingerprint(Database db) async {
+    final dupes = await db.rawQuery('''
+      SELECT fingerprint FROM transactions
+      WHERE fingerprint IS NOT NULL
+      GROUP BY fingerprint HAVING COUNT(*) > 1
+    ''');
+    if (dupes.isEmpty) return;
+
+    final now = DateTime.now().toIso8601String();
+    int removed = 0;
+
+    for (final d in dupes) {
+      final fp = d['fingerprint'] as String;
+      // A row the user has assigned to a person, categorised, annotated or
+      // reviewed is worth more than an untouched auto-import.
+      final rows = await db.rawQuery('''
+        SELECT * FROM transactions WHERE fingerprint = ?
+        ORDER BY
+          (assignedTo IS NOT NULL AND assignedTo != 'Unassigned') DESC,
+          (category IS NOT NULL AND category != 'Other') DESC,
+          (notes IS NOT NULL AND notes != '') DESC,
+          (is_transfer != 0) DESC,
+          rowid ASC
+      ''', [fp]);
+
+      for (final loser in rows.skip(1)) {
+        await db.insert('merged_duplicates', {
+          'id': loser['id'],
+          'fingerprint': fp,
+          'payload': jsonEncode(loser),
+          'merged_at': now,
+        });
+        await db.delete('transactions', where: 'id = ?', whereArgs: [loser['id']]);
+        removed++;
+      }
+    }
+
+    if (removed > 0) {
+      await db.insert(
+        'sync_state',
+        {'key': 'v6_duplicates_merged', 'value': removed.toString()},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    }
   }
 
   static Future<void> _seedDefaultRules(Database db) async {
@@ -228,79 +545,256 @@ class LocalDbService {
   }
 
   // ─── CRUD Methods ──────────────────────────────────────────────────────────
+
+  /// Ensures a transaction carries a fingerprint before it reaches the table.
+  ///
+  /// Anything written without one bypasses the uniqueness guarantee, so this is
+  /// applied on every write path rather than trusted to the callers.
+  /// Also fills in an empty id, deriving it from the fingerprint. The PDF
+  /// parser used to emit `id: ''` for every row, and since id is the primary
+  /// key with an ignore-conflict insert, only the first row of a statement
+  /// survived — the rest were dropped without a word.
+  TransactionModel _withFingerprint(TransactionModel tx, {int occurrence = 0}) {
+    if (tx.fingerprint != null && tx.fingerprint!.isNotEmpty) {
+      return tx.id.isEmpty
+          ? tx.copyWith(id: '${tx.source}_${stableHash(tx.fingerprint!)}')
+          : tx;
+    }
+    final fingerprint = TransactionFingerprint.build(
+      bank: tx.bankName,
+      type: tx.type,
+      amountPaise: tx.amountPaise,
+      dateTime: tx.date,
+      accountTail: tx.accountTail,
+      referenceId: tx.referenceId,
+      upiTransactionId: tx.upiTransactionId,
+      rawText: tx.rawSmsText,
+      description: tx.description,
+      // Only a real message body is safe to hash; a manual entry's "raw text"
+      // is the user's own description and two separate ₹100 "Tea" entries must
+      // not collapse into one.
+      allowBodyHash: tx.source == TxnSource.sms,
+      occurrence: occurrence,
+    );
+
+    return tx.copyWith(
+      fingerprint: fingerprint,
+      id: tx.id.isEmpty ? '${tx.source}_${stableHash(fingerprint)}' : tx.id,
+    );
+  }
+
   Future<void> insertTransaction(TransactionModel transaction) async {
     final db = await database;
+    final tx = _withFingerprint(transaction);
     await db.insert(
       'transactions',
-      transaction.toJson(),
+      tx.toJson(),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
-    await syncLedgerBalances(transaction.bankName, fromDate: transaction.date);
+    await syncLedgerBalances(tx.bankName);
     notifyChange();
   }
 
+  /// Inserts many transactions, skipping any that already exist and any the
+  /// user has previously deleted.
+  ///
+  /// Returns the number actually added. Idempotent: running it twice with the
+  /// same input adds nothing the second time, because identity is decided by
+  /// the unique `fingerprint` index rather than by a generated id.
   Future<int> insertTransactionsBatch(List<TransactionModel> transactions) async {
-    if (transactions.isEmpty) return 0;
-    final db = await database;
-    int addedCount = 0;
-    Set<String> affectedBanks = {};
+    final result = await insertTransactionsDetailed(transactions);
+    return result.added;
+  }
 
+  Future<BatchInsertResult> insertTransactionsDetailed(
+      List<TransactionModel> transactions) async {
+    if (transactions.isEmpty) return const BatchInsertResult(0, 0, 0);
+    final db = await database;
+
+    // Disambiguate rows that are identical in every field within this batch —
+    // a statement really can list two identical fares on one day.
+    final occurrences = <String, int>{};
+    final prepared = <TransactionModel>[];
+    for (final tx in transactions) {
+      final key = '${tx.bankName}|${tx.type}|${tx.amountPaise}|'
+          '${tx.date.toIso8601String()}|${tx.description}';
+      final n = occurrences[key] ?? 0;
+      occurrences[key] = n + 1;
+      prepared.add(_withFingerprint(tx, occurrence: n));
+    }
+
+    final tombstoned = await _tombstonedFingerprints(
+        prepared.map((t) => t.fingerprint!).toList());
+
+    int added = 0;
+    int duplicates = 0;
+    int suppressed = 0;
+    final affectedBanks = <String>{};
+
+    // One SQLite transaction: an interrupted import leaves either all of this
+    // batch or none of it, never a half-written ledger.
     await db.transaction((txn) async {
-      for (var tx in transactions) {
+      for (final tx in prepared) {
+        if (tombstoned.contains(tx.fingerprint)) {
+          suppressed++;
+          continue;
+        }
         final rowId = await txn.insert(
           'transactions',
           tx.toJson(),
           conflictAlgorithm: ConflictAlgorithm.ignore,
         );
-        if (rowId > 0) addedCount++;
-        affectedBanks.add(tx.bankName);
+        if (rowId > 0) {
+          added++;
+          affectedBanks.add(tx.bankName);
+        } else {
+          duplicates++;
+        }
       }
     });
 
-    for (var bank in affectedBanks) {
+    for (final bank in affectedBanks) {
       await syncLedgerBalances(bank);
     }
-    notifyChange();
-    return addedCount;
+    if (added > 0 || suppressed > 0) notifyChange();
+    return BatchInsertResult(added, duplicates, suppressed);
+  }
+
+  Future<Set<String>> _tombstonedFingerprints(List<String> fingerprints) async {
+    if (fingerprints.isEmpty) return <String>{};
+    final db = await database;
+    final result = <String>{};
+    // Chunked to stay well under SQLite's variable limit on large imports.
+    const chunk = 400;
+    for (var i = 0; i < fingerprints.length; i += chunk) {
+      final slice = fingerprints.sublist(
+          i, i + chunk > fingerprints.length ? fingerprints.length : i + chunk);
+      final rows = await db.query(
+        'deleted_fingerprints',
+        columns: ['fingerprint'],
+        where: 'fingerprint IN (${List.filled(slice.length, '?').join(',')})',
+        whereArgs: slice,
+      );
+      result.addAll(rows.map((r) => r['fingerprint'] as String));
+    }
+    return result;
+  }
+
+  Future<TransactionModel?> findByFingerprint(String fingerprint) async {
+    final db = await database;
+    final rows = await db.query('transactions',
+        where: 'fingerprint = ?', whereArgs: [fingerprint], limit: 1);
+    if (rows.isEmpty) return null;
+    return TransactionModel.fromJson(rows.first);
+  }
+
+  /// Finds transactions that look like the same movement as [tx] but carry a
+  /// different fingerprint — same account, direction and amount within a few
+  /// minutes.
+  ///
+  /// These are *not* auto-merged. Two ₹50 payments minutes apart are perfectly
+  /// normal, so the importer flags them for review instead of guessing.
+  Future<List<TransactionModel>> findSoftDuplicates(
+    TransactionModel tx, {
+    Duration window = const Duration(minutes: 5),
+  }) async {
+    final db = await database;
+    final from = tx.date.subtract(window).toIso8601String();
+    final to = tx.date.add(window).toIso8601String();
+    final rows = await db.query(
+      'transactions',
+      where: 'amount_paise = ? AND type = ? AND bankName = ? '
+          'AND date BETWEEN ? AND ? AND fingerprint != ?',
+      whereArgs: [
+        tx.amountPaise, tx.type, tx.bankName, from, to, tx.fingerprint ?? '',
+      ],
+    );
+    return rows.map((r) => TransactionModel.fromJson(r)).toList();
   }
 
   Future<void> updateTransaction(TransactionModel transaction) async {
     final db = await database;
+
+    // The bank may have been corrected during the edit. The *old* bank's
+    // ledger has to be recomputed too, otherwise it keeps a running balance
+    // that still includes a transaction it no longer owns.
+    final before = await db.query('transactions',
+        columns: ['bankName'], where: 'id = ?', whereArgs: [transaction.id]);
+    final previousBank =
+        before.isNotEmpty ? before.first['bankName'] as String? : null;
+
+    final payload = transaction
+        .copyWith(updatedAt: DateTime.now())
+        .toJson()
+      // An edit must never rewrite provenance timestamps.
+      ..remove('created_at');
+
     await db.update(
       'transactions',
-      transaction.toJson(),
+      payload,
       where: 'id = ?',
       whereArgs: [transaction.id],
     );
-    await syncLedgerBalances(transaction.bankName, fromDate: transaction.date);
+
+    await syncLedgerBalances(transaction.bankName);
+    if (previousBank != null && previousBank != transaction.bankName) {
+      await syncLedgerBalances(previousBank);
+    }
     notifyChange();
   }
 
-  Future<void> deleteTransaction(String id) async {
+  /// Deletes a transaction and records a tombstone for its fingerprint.
+  ///
+  /// The tombstone is the whole point: without it the next SMS sync re-reads
+  /// the same message, recomputes the same fingerprint, finds no matching row
+  /// and cheerfully re-imports the transaction the user just removed.
+  Future<void> deleteTransaction(String id, {bool tombstone = true}) async {
     final db = await database;
-    // Get bankName before deleting for sync
-    final List<Map<String, dynamic>> maps = await db.query(
+    final maps = await db.query(
       'transactions',
-      columns: ['bankName'],
+      columns: ['bankName', 'fingerprint', 'source'],
       where: 'id = ?',
       whereArgs: [id],
     );
-    
-    String? bankName;
-    if (maps.isNotEmpty) {
-      bankName = maps.first['bankName'] as String;
-    }
+    if (maps.isEmpty) return;
 
-    await db.delete(
-      'transactions',
-      where: 'id = ?',
-      whereArgs: [id],
-    );
+    final bankName = maps.first['bankName'] as String?;
+    final fingerprint = maps.first['fingerprint'] as String?;
+
+    await db.transaction((txn) async {
+      if (tombstone && fingerprint != null && fingerprint.isNotEmpty) {
+        await txn.insert(
+          'deleted_fingerprints',
+          {
+            'fingerprint': fingerprint,
+            'deleted_at': DateTime.now().toIso8601String(),
+            'note': 'deleted by user',
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      await txn.delete('transactions', where: 'id = ?', whereArgs: [id]);
+    });
 
     if (bankName != null) {
       await syncLedgerBalances(bankName);
     }
     notifyChange();
+  }
+
+  /// Lets a previously deleted transaction be imported again on the next sync.
+  Future<void> forgetTombstone(String fingerprint) async {
+    final db = await database;
+    await db.delete('deleted_fingerprints',
+        where: 'fingerprint = ?', whereArgs: [fingerprint]);
+    notifyChange();
+  }
+
+  Future<int> tombstoneCount() async {
+    final db = await database;
+    final r = await db
+        .rawQuery('SELECT COUNT(*) as c FROM deleted_fingerprints');
+    return (r.first['c'] as num?)?.toInt() ?? 0;
   }
 
   Future<List<TransactionModel>> getAllTransactions() async {
@@ -351,48 +845,50 @@ class LocalDbService {
       'balance': 0.0,
     };
 
-    // 1. All-time balance
-    final balanceResult = await db.rawQuery(
-      "SELECT SUM(CASE WHEN type = 'credit' THEN amount ELSE -amount END) as total FROM transactions"
-    );
-    stats['balance'] = (balanceResult.first['total'] as num?)?.toDouble() ?? 0.0;
+    // 1. All-time balance, summed in integer paise and seeded with the
+    //    per-account opening balances. This is the single derivation of the
+    //    number the dashboard shows; nothing else may write to it.
+    stats['balance'] = Money.toDouble(await currentBalancePaise());
 
-    // 2. Current Month Totals (exclude confirmed transfers)
+    // 2. Current Month Totals (exclude confirmed transfers and failed txns)
     final monthTotals = await db.rawQuery('''
       SELECT
-        SUM(CASE WHEN type = 'credit' THEN amount ELSE 0 END) as income,
-        SUM(CASE WHEN type = 'debit' THEN amount ELSE 0 END) as expense
+        SUM(CASE WHEN type = 'credit' THEN amount_paise ELSE 0 END) as income,
+        SUM(CASE WHEN type = 'debit' THEN amount_paise ELSE 0 END) as expense
       FROM transactions
-      WHERE date LIKE ? AND (is_transfer IS NULL OR is_transfer != 1)
-    ''', ['$monthStr%']);
-    stats['total_income'] = (monthTotals.first['income'] as num?)?.toDouble() ?? 0.0;
-    stats['total_expense'] = (monthTotals.first['expense'] as num?)?.toDouble() ?? 0.0;
+      WHERE date LIKE '$monthStr%' AND $notTransfer AND $notFailed
+    ''');
+    stats['total_income'] =
+        Money.toDouble((monthTotals.first['income'] as num?)?.toInt() ?? 0);
+    stats['total_expense'] =
+        Money.toDouble((monthTotals.first['expense'] as num?)?.toInt() ?? 0);
 
     // 3. Person specific flow (Monthly, exclude transfers)
     final personFlows = await db.rawQuery('''
-      SELECT assignedTo, SUM(CASE WHEN type = 'credit' THEN amount ELSE -amount END) as flow
+      SELECT assignedTo, SUM(CASE WHEN type = 'credit' THEN amount_paise ELSE -amount_paise END) as flow
       FROM transactions
-      WHERE date LIKE ? AND assignedTo IN ('Mom', 'Dad')
-        AND (is_transfer IS NULL OR is_transfer != 1)
+      WHERE date LIKE '$monthStr%' AND assignedTo IN ('Mom', 'Dad')
+        AND $notTransfer AND $notFailed
       GROUP BY assignedTo
     ''', ['$monthStr%']);
     for (var row in personFlows) {
-      if (row['assignedTo'] == 'Mom') stats['mom_flow'] = (row['flow'] as num?)?.toDouble() ?? 0.0;
-      if (row['assignedTo'] == 'Dad') stats['dad_flow'] = (row['flow'] as num?)?.toDouble() ?? 0.0;
+      final flow = Money.toDouble((row['flow'] as num?)?.toInt() ?? 0);
+      if (row['assignedTo'] == 'Mom') stats['mom_flow'] = flow;
+      if (row['assignedTo'] == 'Dad') stats['dad_flow'] = flow;
     }
 
     // 4. Me specific Bank flows (Monthly, exclude transfers)
     final bankFlows = await db.rawQuery('''
-      SELECT bankName, type, SUM(amount) as total
+      SELECT bankName, type, SUM(amount_paise) as total
       FROM transactions
-      WHERE date LIKE ? AND assignedTo = 'Me' AND bankName IN ('SBI', 'BoB')
-        AND (is_transfer IS NULL OR is_transfer != 1)
+      WHERE date LIKE '$monthStr%' AND assignedTo = 'Me' AND bankName IN ('SBI', 'BoB')
+        AND $notTransfer AND $notFailed
       GROUP BY bankName, type
     ''', ['$monthStr%']);
     for (var row in bankFlows) {
       final bank = row['bankName'];
       final type = row['type'];
-      final val = (row['total'] as num?)?.toDouble() ?? 0.0;
+      final val = Money.toDouble((row['total'] as num?)?.toInt() ?? 0);
       
       if (bank == 'SBI') {
         if (type == 'credit') stats['me_sbi_income'] = val;
@@ -484,50 +980,60 @@ class LocalDbService {
     return maps.map((m) => TransactionModel.fromJson(m)).toList();
   }
 
-  Future<void> syncLedgerBalances(String bankName, {DateTime? fromDate}) async {
+  /// Recomputes the running ledger balance for one bank.
+  ///
+  /// This is a full recompute from the account's opening balance rather than an
+  /// incremental patch from `fromDate`. The incremental version had two ways to
+  /// go wrong that both produced a permanently skewed ledger: it seeded itself
+  /// from a neighbouring row's `closingBalance` (so one bad value propagated
+  /// forever), and `ORDER BY date` alone is not a total order — statement
+  /// imports routinely give several rows the same timestamp, and SQLite was
+  /// free to order those differently on each run. Ordering by `date, id` makes
+  /// the result deterministic.
+  ///
+  /// Cost is linear in one bank's transactions, which is a few thousand rows at
+  /// most; correctness is worth more than the saved milliseconds here.
+  Future<void> syncLedgerBalances(String bankName) async {
     final db = await database;
-    
-    // 1. Get starting balance if fromDate is provided
-    double runningBalance = 0.0;
-    String queryWhere = 'bankName = ?';
-    List<dynamic> queryArgs = [bankName];
-    
-    if (fromDate != null) {
-      final prevResult = await db.rawQuery('''
-        SELECT closingBalance FROM transactions 
-        WHERE bankName = ? AND date < ? 
-        ORDER BY date DESC LIMIT 1
-      ''', [bankName, fromDate.toIso8601String()]);
-      
-      if (prevResult.isNotEmpty) {
-        runningBalance = (prevResult.first['closingBalance'] as num?)?.toDouble() ?? 0.0;
-      }
-      queryWhere += ' AND date >= ?';
-      queryArgs.add(fromDate.toIso8601String());
-    }
 
-    // 2. Fetch only affected transactions
-    final List<Map<String, dynamic>> maps = await db.query(
-      'transactions', 
-      where: queryWhere, 
-      whereArgs: queryArgs, 
-      orderBy: 'date ASC'
+    int running = await openingBalancePaise(bankName);
+
+    final maps = await db.query(
+      'transactions',
+      columns: ['id', 'type', 'amount_paise', 'status', 'closingBalance'],
+      where: 'bankName = ?',
+      whereArgs: [bankName],
+      orderBy: 'date ASC, id ASC',
     );
-    
     if (maps.isEmpty) return;
 
-    Batch batch = db.batch();
-    bool hasUpdates = false;
-    
-    for (var map in maps) {
-      TransactionModel tx = TransactionModel.fromJson(map);
-      runningBalance += (tx.type == 'credit' ? tx.amount : -tx.amount);
-      if (tx.closingBalance != runningBalance) {
-        batch.update('transactions', {'closingBalance': runningBalance}, where: 'id = ?', whereArgs: [tx.id]);
-        hasUpdates = true;
+    final batch = db.batch();
+    for (final map in maps) {
+      final status = map['status'] as String?;
+      final paise = (map['amount_paise'] as num?)?.toInt() ?? 0;
+      // Failed transactions appear in the list but move no money.
+      if (status != TxnStatus.failed) {
+        running += (map['type'] == 'credit') ? paise : -paise;
+      }
+      final rupees = Money.toDouble(running);
+      final current = (map['closingBalance'] as num?)?.toDouble();
+      if (current == null || (current - rupees).abs() > 0.001) {
+        batch.update('transactions', {'closingBalance': rupees},
+            where: 'id = ?', whereArgs: [map['id']]);
       }
     }
     await batch.commit(noResult: true);
+  }
+
+  /// Recomputes every bank's ledger. Used after restores and bulk edits, where
+  /// working out exactly which banks moved is more error-prone than redoing all.
+  Future<void> syncAllLedgers() async {
+    final db = await database;
+    final banks = await db
+        .rawQuery('SELECT DISTINCT bankName FROM transactions WHERE bankName IS NOT NULL');
+    for (final b in banks) {
+      await syncLedgerBalances(b['bankName'] as String);
+    }
   }
 
   Future<void> saveBudget(String category, double amount) async {
@@ -562,8 +1068,8 @@ class LocalDbService {
     final List<Map<String, dynamic>> spending = await db.rawQuery('''
       SELECT category, SUM(amount) as total
       FROM transactions
-      WHERE date LIKE ? AND type = 'debit'
-        AND (is_transfer IS NULL OR is_transfer != 1)
+      WHERE date LIKE '$monthStr%' AND type = 'debit'
+        AND $notTransfer AND $notFailed
       GROUP BY category
     ''', ['$monthStr%']);
 
@@ -606,7 +1112,7 @@ class LocalDbService {
         WHERE type = 'debit' AND category = ?
           AND date >= date('now', '-4 months')
           AND strftime('%Y-%m', date) != strftime('%Y-%m', 'now')
-          AND (is_transfer IS NULL OR is_transfer != 1)
+          AND $notTransfer AND $notFailed
         GROUP BY m
       )
     ''', [category]);
@@ -621,8 +1127,8 @@ class LocalDbService {
     final currentRows = await db.rawQuery('''
       SELECT category, SUM(amount) as current_amount
       FROM transactions
-      WHERE type = 'debit' AND date LIKE ?
-        AND (is_transfer IS NULL OR is_transfer != 1)
+      WHERE type = 'debit' AND date LIKE '$monthStr%'
+        AND $notTransfer AND $notFailed
       GROUP BY category
     ''', ['$monthStr%']);
 
@@ -632,8 +1138,8 @@ class LocalDbService {
         FROM transactions
         WHERE type = 'debit'
           AND date >= date('now', '-4 months')
-          AND strftime('%Y-%m', date) != ?
-          AND (is_transfer IS NULL OR is_transfer != 1)
+          AND strftime('%Y-%m', date) != '$monthStr'
+          AND $notTransfer AND $notFailed
         GROUP BY category, m
       )
       GROUP BY category
@@ -673,9 +1179,9 @@ class LocalDbService {
     final result = await db.rawQuery('''
       SELECT SUM(amount) as current_spend
       FROM transactions
-      WHERE type = 'debit' AND date LIKE ?
-        AND (is_transfer IS NULL OR is_transfer != 1)
-    ''', ['$monthStr%']);
+      WHERE type = 'debit' AND date LIKE '$monthStr%'
+        AND $notTransfer AND $notFailed
+    ''');
     final currentSpend = (result.first['current_spend'] as num?)?.toDouble() ?? 0.0;
     final forecastedSpend = daysElapsed > 0 ? (currentSpend / daysElapsed) * totalDays : 0.0;
 
@@ -709,7 +1215,7 @@ class LocalDbService {
         t2.description AS credit_desc
       FROM transactions t1
       INNER JOIN transactions t2 ON (
-        t1.amount = t2.amount
+        t1.amount_paise = t2.amount_paise
         AND t2.type = 'credit'
         AND t1.bankName != t2.bankName
         AND ABS(julianday(t1.date) - julianday(t2.date)) <= 2.0
@@ -758,7 +1264,7 @@ class LocalDbService {
         ROUND(AVG(amount), 2) AS avg_amount,
         MAX(date) AS last_seen
       FROM transactions
-      WHERE type = 'debit' AND date >= date('now', '-6 months')
+      WHERE type = 'debit' AND date >= date('now', '-6 months') AND $notFailed
       GROUP BY LOWER(description)
       HAVING month_count >= 3
       ORDER BY avg_amount DESC
@@ -778,9 +1284,9 @@ class LocalDbService {
       
       final result = await db.rawQuery('''
         SELECT SUM(amount) as total FROM transactions
-        WHERE date LIKE ? AND type = 'debit'
-          AND (is_transfer IS NULL OR is_transfer != 1)
-      ''', ['$monthStr%']);
+        WHERE date LIKE '$monthStr%' AND type = 'debit'
+          AND $notTransfer AND $notFailed
+      ''');
       
       trend[monthKey] = (result.first['total'] as num?)?.toDouble() ?? 0.0;
     }
@@ -830,7 +1336,9 @@ class LocalDbService {
             txMap['id'] = entry.key;
           }
           
-          TransactionModel tx = TransactionModel.fromJson(txMap);
+          // Older backups predate fingerprints; compute one on the way in so
+          // restored rows still participate in de-duplication.
+          TransactionModel tx = _withFingerprint(TransactionModel.fromJson(txMap));
           await txn.insert('transactions', tx.toJson(), conflictAlgorithm: ConflictAlgorithm.replace);
         } catch (e) {
           print('Failed to restore transaction ${entry.key}: $e');
@@ -838,15 +1346,24 @@ class LocalDbService {
       }
     });
 
-    // Re-sync specific banks after restore to ensure math is correct
-    await syncLedgerBalances('SBI');
-    await syncLedgerBalances('BoB');
+    // A backup can contain any bank, not just the two the app started with.
+    await syncAllLedgers();
     notifyChange();
   }
 
+  /// Wipes the transaction table.
+  ///
+  /// Tombstones go with it: after a deliberate "clear everything", the user
+  /// expects the next sync to rebuild from scratch, and leaving the tombstones
+  /// behind would permanently suppress every transaction they had ever deleted.
   Future<void> clearAllTransactions() async {
     final db = await database;
-    await db.delete('transactions');
+    await db.transaction((txn) async {
+      await txn.delete('transactions');
+      await txn.delete('deleted_fingerprints');
+      await txn.delete('sms_import_log');
+      await txn.delete('sync_state', where: 'key != ?', whereArgs: ['v6_duplicates_merged']);
+    });
     notifyChange();
   }
 
@@ -904,31 +1421,32 @@ class LocalDbService {
   Future<void> bulkUpdateBank(Set<String> txIds, String newBank) async {
     if (txIds.isEmpty) return;
     final db = await database;
+    final ids = txIds.toList();
+    final placeholders = List.filled(ids.length, '?').join(',');
 
-    // Capture the banks these transactions currently belong to, so their
-    // running-balance ledgers are re-synced too (not just the destination bank).
-    final placeholders = txIds.map((_) => '?').join(',');
-    final oldRows = await db.query(
-      'transactions',
-      columns: ['bankName'],
-      where: 'bankName IS NOT NULL AND id IN ($placeholders)',
-      whereArgs: txIds.toList(),
+    // Capture the banks losing these transactions before the update, so their
+    // ledgers get recomputed too. Only syncing the destination bank left every
+    // source bank with a running balance that still counted the moved rows.
+    final before = await db.rawQuery(
+      'SELECT DISTINCT bankName FROM transactions WHERE id IN ($placeholders)',
+      ids,
     );
-    final Set<String> affectedBanks =
-        oldRows.map((m) => m['bankName'] as String).toSet()..add(newBank);
+    final affected = before
+        .map((r) => r['bankName'] as String?)
+        .whereType<String>()
+        .toSet()
+      ..add(newBank);
 
     await db.transaction((txn) async {
-      for (var id in txIds) {
-        await txn.update(
-          'transactions',
-          {'bankName': newBank},
-          where: 'id = ?',
-          whereArgs: [id],
-        );
-      }
+      await txn.update(
+        'transactions',
+        {'bankName': newBank, 'updated_at': DateTime.now().toIso8601String()},
+        where: 'id IN ($placeholders)',
+        whereArgs: ids,
+      );
     });
 
-    for (final bank in affectedBanks) {
+    for (final bank in affected) {
       await syncLedgerBalances(bank);
     }
     notifyChange();
@@ -951,24 +1469,41 @@ class LocalDbService {
   }
 
   // Bulk Delete Transactions
-  Future<void> bulkDeleteTransactions(Set<String> txIds) async {
+  Future<void> bulkDeleteTransactions(Set<String> txIds,
+      {bool tombstone = true}) async {
+    if (txIds.isEmpty) return;
     final db = await database;
-    
-    // Identify affected banks before deleting
-    final List<Map<String, dynamic>> maps = await db.query(
+    final ids = txIds.toList();
+    final placeholders = List.filled(ids.length, '?').join(',');
+
+    // Identify affected banks and fingerprints before deleting
+    final maps = await db.query(
       'transactions',
-      columns: ['bankName'],
-      where: 'id IN (${txIds.map((_) => '?').join(',')})',
-      whereArgs: txIds.toList(),
+      columns: ['bankName', 'fingerprint'],
+      where: 'id IN ($placeholders)',
+      whereArgs: ids,
     );
-    
-    final Set<String> affectedBanks = maps.map((m) => m['bankName'] as String).toSet();
+
+    final affectedBanks =
+        maps.map((m) => m['bankName'] as String?).whereType<String>().toSet();
+    final fingerprints =
+        maps.map((m) => m['fingerprint'] as String?).whereType<String>().toList();
+    final now = DateTime.now().toIso8601String();
 
     await db.transaction((txn) async {
+      if (tombstone) {
+        for (final fp in fingerprints) {
+          await txn.insert(
+            'deleted_fingerprints',
+            {'fingerprint': fp, 'deleted_at': now, 'note': 'bulk delete'},
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+        }
+      }
       await txn.delete(
         'transactions',
-        where: 'id IN (${txIds.map((_) => '?').join(',')})',
-        whereArgs: txIds.toList(),
+        where: 'id IN ($placeholders)',
+        whereArgs: ids,
       );
     });
 
@@ -989,5 +1524,395 @@ class LocalDbService {
     await batch.commit(noResult: true);
     await syncLedgerBalances(bankName);
     notifyChange();
+  }
+
+  // ── Opening balances ────────────────────────────────────────────────────────
+
+  /// The balance an account held before the first transaction the app knows
+  /// about. Without it, a derived balance can only ever be a *net change*, and
+  /// comparing that against a real bank balance is meaningless.
+  Future<int> openingBalancePaise(String bankName) async {
+    final db = await database;
+    final rows = await db.query('accounts',
+        columns: ['opening_balance_paise'],
+        where: 'bank_name = ?',
+        whereArgs: [bankName],
+        limit: 1);
+    if (rows.isEmpty) return 0;
+    return (rows.first['opening_balance_paise'] as num?)?.toInt() ?? 0;
+  }
+
+  Future<int> totalOpeningBalancePaise() async {
+    final db = await database;
+    final r = await db
+        .rawQuery('SELECT SUM(opening_balance_paise) as total FROM accounts');
+    return (r.first['total'] as num?)?.toInt() ?? 0;
+  }
+
+  Future<void> setOpeningBalance(String bankName, int paise,
+      {DateTime? openingDate}) async {
+    final db = await database;
+    await db.insert(
+      'accounts',
+      {
+        'bank_name': bankName,
+        'opening_balance_paise': paise,
+        'opening_date': openingDate?.toIso8601String(),
+        'updated_at': DateTime.now().toIso8601String(),
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+    // The whole ledger for that bank shifts by the delta.
+    await syncLedgerBalances(bankName);
+    notifyChange();
+  }
+
+  Future<List<Map<String, dynamic>>> getAccounts() async {
+    final db = await database;
+    return (await db.query('accounts', orderBy: 'bank_name ASC'))
+        .map((r) => Map<String, dynamic>.from(r))
+        .toList();
+  }
+
+  // ── Balance derivation ──────────────────────────────────────────────────────
+
+  /// The one true balance: opening balances plus every non-failed transaction,
+  /// summed as integers.
+  ///
+  /// Nothing in the app stores a balance that it later mutates — every figure
+  /// on screen comes back through here, which is what makes an edit, an import
+  /// and a delete all take effect immediately and identically.
+  Future<int> currentBalancePaise() async {
+    final db = await database;
+    final r = await db.rawQuery('''
+      SELECT SUM(CASE WHEN type = 'credit' THEN amount_paise ELSE -amount_paise END) as total
+      FROM transactions WHERE $notFailed
+    ''');
+    final movement = (r.first['total'] as num?)?.toInt() ?? 0;
+    return await totalOpeningBalancePaise() + movement;
+  }
+
+  Future<Map<String, int>> balanceByBankPaise() async {
+    final db = await database;
+    final rows = await db.rawQuery('''
+      SELECT bankName,
+             SUM(CASE WHEN type = 'credit' THEN amount_paise ELSE -amount_paise END) as total
+      FROM transactions WHERE $notFailed
+      GROUP BY bankName
+    ''');
+    final result = <String, int>{};
+    for (final r in rows) {
+      final bank = r['bankName'] as String? ?? 'Unknown';
+      result[bank] = (r['total'] as num?)?.toInt() ?? 0;
+    }
+    for (final acc in await getAccounts()) {
+      final bank = acc['bank_name'] as String;
+      final opening = (acc['opening_balance_paise'] as num?)?.toInt() ?? 0;
+      result[bank] = (result[bank] ?? 0) + opening;
+    }
+    return result;
+  }
+
+  // ── Sync state ──────────────────────────────────────────────────────────────
+
+  static const String kLastSmsSyncAt = 'last_sms_sync_at';
+  static const String kLastSmsSyncReport = 'last_sms_sync_report';
+
+  /// Last time messages captured by the Android broadcast receiver were
+  /// drained. Tracked separately from a full inbox scan so the sync screen can
+  /// show that background capture is actually working.
+  static const String kLastSmsCaptureAt = 'last_sms_capture_at';
+
+  /// Records that the SMS permission has been asked for since RECEIVE_SMS was
+  /// added to the manifest, so the request happens exactly once rather than on
+  /// every launch.
+  static const String kSmsPermissionPrompted = 'sms_permission_prompted_v2';
+
+  Future<String?> getSyncState(String key) async {
+    final db = await database;
+    final rows = await db
+        .query('sync_state', where: 'key = ?', whereArgs: [key], limit: 1);
+    if (rows.isEmpty) return null;
+    return rows.first['value'] as String?;
+  }
+
+  Future<void> setSyncState(String key, String value) async {
+    final db = await database;
+    await db.insert('sync_state', {'key': key, 'value': value},
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<DateTime?> lastSmsSyncAt() async {
+    final v = await getSyncState(kLastSmsSyncAt);
+    return v == null ? null : DateTime.tryParse(v);
+  }
+
+  Future<DateTime?> lastSmsCaptureAt() async {
+    final v = await getSyncState(kLastSmsCaptureAt);
+    return v == null ? null : DateTime.tryParse(v);
+  }
+
+  // ── SMS import audit log ────────────────────────────────────────────────────
+
+  /// Records what happened to each message. Written in one batch so a crash
+  /// mid-import cannot leave the log claiming a transaction was imported when
+  /// the insert never committed.
+  Future<void> writeImportLog(List<Map<String, dynamic>> entries) async {
+    if (entries.isEmpty) return;
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+    final batch = db.batch();
+    for (final e in entries) {
+      batch.insert(
+        'sms_import_log',
+        {...e, 'logged_at': now},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    }
+    await batch.commit(noResult: true);
+  }
+
+  /// Messages the parser could not turn into a transaction, newest first.
+  /// These are shown to the user rather than discarded — an unreadable format
+  /// is the most likely cause of a reconciliation gap.
+  Future<List<Map<String, dynamic>>> getUnparsedMessages({int limit = 100}) async {
+    final db = await database;
+    final rows = await db.query(
+      'sms_import_log',
+      where: 'outcome = ?',
+      whereArgs: ['unparsed'],
+      orderBy: 'received_at DESC',
+      limit: limit,
+    );
+    return rows.map((r) => Map<String, dynamic>.from(r)).toList();
+  }
+
+  Future<Map<String, int>> getImportLogSummary() async {
+    final db = await database;
+    final rows = await db.rawQuery(
+        'SELECT outcome, COUNT(*) as c FROM sms_import_log GROUP BY outcome');
+    return {
+      for (final r in rows)
+        (r['outcome'] as String? ?? 'unknown'): (r['c'] as num).toInt()
+    };
+  }
+
+  // ── Review queue ────────────────────────────────────────────────────────────
+
+  Future<List<TransactionModel>> getNeedsReviewTransactions() async {
+    final db = await database;
+    final rows = await db.query('transactions',
+        where: 'needs_review = 1', orderBy: 'date DESC');
+    return rows.map((r) => TransactionModel.fromJson(r)).toList();
+  }
+
+  Future<int> needsReviewCount() async {
+    final db = await database;
+    final r = await db.rawQuery(
+        'SELECT COUNT(*) as c FROM transactions WHERE needs_review = 1');
+    return (r.first['c'] as num?)?.toInt() ?? 0;
+  }
+
+  Future<void> resolveReview(String id) async {
+    final db = await database;
+    await db.update(
+      'transactions',
+      {
+        'needs_review': 0,
+        'review_reason': null,
+        'updated_at': DateTime.now().toIso8601String(),
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+    notifyChange();
+  }
+
+  /// Flips a transaction between counted and not-counted.
+  ///
+  /// Used when the user knows better than the parser — e.g. a "declined" alert
+  /// that did in fact levy a charge. The balance follows automatically because
+  /// it is derived, never stored.
+  Future<void> setTransactionStatus(String id, String status) async {
+    final db = await database;
+    final rows = await db.query('transactions',
+        columns: ['bankName'], where: 'id = ?', whereArgs: [id], limit: 1);
+    await db.update(
+      'transactions',
+      {'status': status, 'updated_at': DateTime.now().toIso8601String()},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+    if (rows.isNotEmpty) {
+      await syncLedgerBalances(rows.first['bankName'] as String);
+    }
+    notifyChange();
+  }
+
+  // ── Reconciliation ──────────────────────────────────────────────────────────
+
+  /// Compares the derived ledger against the balance the bank itself stated in
+  /// its most recent SMS, per account.
+  ///
+  /// Deliberately read-only. A mismatch is evidence that a transaction is
+  /// missing, duplicated or miscategorised — quietly nudging numbers to agree
+  /// would destroy exactly the signal the user needs.
+  Future<List<ReconciliationResult>> reconcile() async {
+    final db = await database;
+
+    final banks = await db.rawQuery(
+        'SELECT DISTINCT bankName FROM transactions WHERE bankName IS NOT NULL');
+
+    final unparsed = (await getImportLogSummary())['unparsed'] ?? 0;
+    final reviewCount = await needsReviewCount();
+
+    final results = <ReconciliationResult>[];
+    for (final b in banks) {
+      final bank = b['bankName'] as String;
+
+      // The anchor is the newest transaction whose SMS quoted a balance. Its
+      // own `closingBalance` is the derived ledger at exactly that point, so
+      // the two figures are directly comparable with no extra summation.
+      final anchorRows = await db.query(
+        'transactions',
+        where: 'bankName = ? AND sms_balance_paise IS NOT NULL AND $notFailed',
+        whereArgs: [bank],
+        orderBy: 'date DESC, id DESC',
+        limit: 1,
+      );
+
+      final openingPaise = await openingBalancePaise(bank);
+
+      if (anchorRows.isEmpty) {
+        results.add(ReconciliationResult(
+          bankName: bank,
+          openingPaise: openingPaise,
+          calculatedPaise: (await balanceByBankPaise())[bank] ?? 0,
+          bankReportedPaise: null,
+          asOf: null,
+          unparsedMessages: unparsed,
+          needsReviewCount: reviewCount,
+        ));
+        continue;
+      }
+
+      final anchor = anchorRows.first;
+      final reported = (anchor['sms_balance_paise'] as num).toInt();
+      final derivedRupees = (anchor['closingBalance'] as num?)?.toDouble();
+      final derived =
+          derivedRupees == null ? null : Money.fromDouble(derivedRupees);
+
+      results.add(ReconciliationResult(
+        bankName: bank,
+        openingPaise: openingPaise,
+        calculatedPaise: derived ?? 0,
+        bankReportedPaise: reported,
+        asOf: DateTime.tryParse((anchor['date'] ?? '').toString()),
+        unparsedMessages: unparsed,
+        needsReviewCount: reviewCount,
+        hasAnchor: derived != null,
+      ));
+    }
+
+    return results;
+  }
+
+  Stream<List<ReconciliationResult>> get reconciliationStream =>
+      _streamOf(reconcile);
+
+  Stream<List<TransactionModel>> get needsReviewStream =>
+      _streamOf(getNeedsReviewTransactions);
+}
+
+/// Outcome of a batch insert. Distinguishing "already had it" from "user had
+/// deleted it" matters: the first is normal, the second is why an expected
+/// transaction is missing.
+class BatchInsertResult {
+  final int added;
+  final int duplicates;
+  final int suppressedByTombstone;
+
+  const BatchInsertResult(this.added, this.duplicates, this.suppressedByTombstone);
+
+  int get total => added + duplicates + suppressedByTombstone;
+}
+
+/// A per-account comparison of the derived balance against the bank's own
+/// reported figure.
+class ReconciliationResult {
+  final String bankName;
+  final int openingPaise;
+  final int calculatedPaise;
+  final int? bankReportedPaise;
+  final DateTime? asOf;
+  final int unparsedMessages;
+  final int needsReviewCount;
+  final bool hasAnchor;
+
+  const ReconciliationResult({
+    required this.bankName,
+    required this.openingPaise,
+    required this.calculatedPaise,
+    required this.bankReportedPaise,
+    required this.asOf,
+    this.unparsedMessages = 0,
+    this.needsReviewCount = 0,
+    this.hasAnchor = false,
+  });
+
+  bool get canCompare => bankReportedPaise != null && hasAnchor;
+
+  /// Positive means the bank holds more than the transactions explain.
+  int get differencePaise =>
+      canCompare ? bankReportedPaise! - calculatedPaise : 0;
+
+  /// A one-paisa tolerance absorbs nothing — the arithmetic is exact — but it
+  /// keeps rows imported from rounded statement values from nagging.
+  bool get isReconciled => canCompare && differencePaise.abs() <= 1;
+
+  /// The opening balance that would make the ledger agree with the bank.
+  ///
+  /// Offered as a suggestion the user applies explicitly. It is legitimate
+  /// because an opening balance is real missing data, unlike a fudge factor
+  /// bolted onto the displayed total.
+  int get suggestedOpeningPaise => openingPaise + differencePaise;
+
+  List<String> get possibleReasons {
+    if (!canCompare) {
+      return [
+        'No bank-reported balance found yet for $bankName. Sync SMS, or add an '
+            'opening balance so the derived total can be compared.',
+      ];
+    }
+    if (isReconciled) return const [];
+
+    final reasons = <String>[];
+    if (openingPaise == 0) {
+      reasons.add(
+          'No opening balance is set for $bankName, so the ledger starts at ₹0 '
+          'and only reflects transactions the app has seen.');
+    }
+    if (differencePaise > 0) {
+      reasons.add(
+          'The bank holds more than the recorded transactions explain — a '
+          'credit is likely missing (cash deposit, interest, or an SMS that '
+          'could not be parsed).');
+    } else {
+      reasons.add(
+          'The recorded transactions account for more money than the bank '
+          'holds — a transaction may be recorded twice, or an expense was '
+          'entered that never went through.');
+    }
+    if (unparsedMessages > 0) {
+      reasons.add(
+          '$unparsedMessages message(s) could not be parsed and may contain '
+          'the missing transaction.');
+    }
+    if (needsReviewCount > 0) {
+      reasons.add(
+          '$needsReviewCount transaction(s) are flagged for review and may be '
+          'wrong or duplicated.');
+    }
+    return reasons;
   }
 }

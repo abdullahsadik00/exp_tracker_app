@@ -1,5 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- READ_SMS backfills history from the inbox; RECEIVE_SMS captures new
+         messages as they arrive. Both belong to the SMS permission group, so
+         permission_handler's Permission.sms requests them together. -->
     <uses-permission android:name="android.permission.READ_SMS"/>
+    <uses-permission android:name="android.permission.RECEIVE_SMS"/>
     <application
         android:label="family_expense_tracker"
         android:name="${applicationName}"
@@ -26,6 +30,20 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- Captures transaction SMS as they arrive, including when the app is
+             not running. android:permission restricts the broadcast to the
+             system, so no other app can inject fake messages into the queue.
+             The receiver never calls abortBroadcast() — doing so would hide
+             incoming SMS from the user's actual messaging app. -->
+        <receiver
+            android:name=".SmsReceiver"
+            android:exported="true"
+            android:permission="android.permission.BROADCAST_SMS">
+            <intent-filter android:priority="999">
+                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+        </receiver>
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
