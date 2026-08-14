@@ -29,7 +29,7 @@ class ExportService {
       }
 
       // Convert rows to a CSV string (csv package API)
-      String csvData = const ListToCsvConverter().convert(rows);
+      String csvData = Csv().encode(rows);
       
       final directory = await getApplicationDocumentsDirectory();
       final path = "${directory.path}/transactions_export.csv";
