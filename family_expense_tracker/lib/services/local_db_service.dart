@@ -867,7 +867,7 @@ class LocalDbService {
     final personFlows = await db.rawQuery('''
       SELECT assignedTo, SUM(CASE WHEN type = 'credit' THEN amount_paise ELSE -amount_paise END) as flow
       FROM transactions
-      WHERE date LIKE '$monthStr%' AND assignedTo IN ('Mom', 'Dad')
+      WHERE date LIKE ? AND assignedTo IN ('Mom', 'Dad')
         AND $notTransfer AND $notFailed
       GROUP BY assignedTo
     ''', ['$monthStr%']);
@@ -881,7 +881,7 @@ class LocalDbService {
     final bankFlows = await db.rawQuery('''
       SELECT bankName, type, SUM(amount_paise) as total
       FROM transactions
-      WHERE date LIKE '$monthStr%' AND assignedTo = 'Me' AND bankName IN ('SBI', 'BoB')
+      WHERE date LIKE ? AND assignedTo = 'Me' AND bankName IN ('SBI', 'BoB')
         AND $notTransfer AND $notFailed
       GROUP BY bankName, type
     ''', ['$monthStr%']);
@@ -1068,7 +1068,7 @@ class LocalDbService {
     final List<Map<String, dynamic>> spending = await db.rawQuery('''
       SELECT category, SUM(amount) as total
       FROM transactions
-      WHERE date LIKE '$monthStr%' AND type = 'debit'
+      WHERE date LIKE ? AND type = 'debit'
         AND $notTransfer AND $notFailed
       GROUP BY category
     ''', ['$monthStr%']);
@@ -1127,7 +1127,7 @@ class LocalDbService {
     final currentRows = await db.rawQuery('''
       SELECT category, SUM(amount) as current_amount
       FROM transactions
-      WHERE type = 'debit' AND date LIKE '$monthStr%'
+      WHERE type = 'debit' AND date LIKE ?
         AND $notTransfer AND $notFailed
       GROUP BY category
     ''', ['$monthStr%']);
@@ -1138,7 +1138,7 @@ class LocalDbService {
         FROM transactions
         WHERE type = 'debit'
           AND date >= date('now', '-4 months')
-          AND strftime('%Y-%m', date) != '$monthStr'
+          AND strftime('%Y-%m', date) != ?
           AND $notTransfer AND $notFailed
         GROUP BY category, m
       )
