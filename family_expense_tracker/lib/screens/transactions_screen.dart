@@ -814,9 +814,12 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                         fontWeight: FontWeight.w900,
                         letterSpacing: -1,
                       ),
+                      // No prefixText for the sign: a prefix makes
+                      // TextAlign.center centre only the editable half, so the
+                      // number sat off-centre and drifted as it was typed.
+                      // Direction is already carried by the colour and by the
+                      // "Credit/Debit Transaction" line directly beneath.
                       decoration: InputDecoration(
-                        prefixText: isCredit ? '+ ' : '- ',
-                        prefixStyle: TextStyle(color: amountColor, fontSize: 36, fontWeight: FontWeight.w900),
                         border: InputBorder.none,
                         hintText: '0.00',
                         hintStyle: TextStyle(color: amountColor.withOpacity(0.3)),
@@ -831,29 +834,58 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                         fontWeight: FontWeight.w600,
                       ),
                     ),
+                    const SizedBox(height: 24),
+
+                    // The label sits above rather than in a prefixText: a
+                    // prefix leaves TextAlign.center centring only the
+                    // editable half inside whatever room is left, so the line
+                    // as a whole was never centred and slid sideways with
+                    // every digit typed.
+                    Text(
+                      'BALANCE AFTER THIS (₹)',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: AppColors.textSecondary.withOpacity(0.5),
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 24),
                       child: TextFormField(
                         controller: balanceController,
                         keyboardType: const TextInputType.numberWithOptions(decimal: true),
                         textAlign: TextAlign.center,
-                        style: const TextStyle(fontSize: 16, color: AppColors.textSecondary, fontWeight: FontWeight.w600),
+                        style: const TextStyle(fontSize: 18, color: AppColors.textPrimary, fontWeight: FontWeight.w700),
                         decoration: InputDecoration(
-                          prefixText: 'Balance after this: ₹',
-                          prefixStyle: const TextStyle(color: AppColors.textSecondary, fontSize: 16, fontWeight: FontWeight.w600),
                           border: InputBorder.none,
-                          hintText: '0.00',
-                          hintStyle: TextStyle(color: AppColors.textSecondary.withOpacity(0.3)),
+                          isDense: true,
+                          contentPadding: EdgeInsets.zero,
+                          // Same size as the input so the field does not change
+                          // height the moment a digit is typed.
+                          hintText: 'Not recorded',
+                          hintStyle: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w400,
+                              color: AppColors.textSecondary.withOpacity(0.35)),
                         ),
                       ),
                     ),
-                    Text(
-                      'What ${txn.bankName} actually held after this transaction. '
-                      'Saving offers to correct the whole account to match.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: AppColors.textSecondary.withOpacity(0.6),
-                        fontSize: 11,
+                    const SizedBox(height: 6),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Text(
+                        'What ${txn.bankName} actually held after this '
+                        'transaction. Saving offers to correct the whole '
+                        'account to match.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: AppColors.textSecondary.withOpacity(0.6),
+                          fontSize: 11,
+                          height: 1.4,
+                        ),
                       ),
                     ),
                     const SizedBox(height: 32),
@@ -948,7 +980,7 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                             ),
                             _buildInfoRow(
                                 'Recorded balance',
-                                NumberFormat.currency(symbol: '₹', decimalDigits: 2)
+                                currencyFormat
                                     .format(Money.toDouble(txn.smsBalancePaise!)),
                                 Icons.account_balance_wallet_outlined),
                           ],
@@ -1353,40 +1385,39 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
 
   Widget _buildInfoRow(String label, String value, IconData icon) {
     return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Icon(icon, size: 20, color: AppColors.textSecondary),
         const SizedBox(width: 12),
+        // Labels and values split the row 4:6 rather than the even split a
+        // Flexible-against-Expanded pairing produces. Every value here is
+        // longer than its label — a date, a UPI reference, a six-figure
+        // balance — so an even split ellipsised "Recorded balance" while the
+        // value half sat half empty.
         Flexible(
+          flex: 4,
           child: Text(
             label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style:
-                const TextStyle(color: AppColors.textSecondary, fontSize: 13),
+            style: const TextStyle(
+                color: AppColors.textSecondary, fontSize: 13, height: 1.3),
           ),
         ),
         const SizedBox(width: 16),
-        // The value took its natural width with only a Spacer holding it off
-        // the label, so a long one — a six-figure bank balance, a full UPI
-        // reference — ran past the edge of the row and had its last character
-        // clipped. Scaling down inside the space that is left keeps every
-        // digit on screen; a balance missing its final digit is worse than a
-        // small one.
+        // A long value — a six-figure balance, a full UPI reference — used to
+        // run past the edge of the row and lose its last character. It wraps
+        // instead of being scaled: FittedBox gave every row a different font
+        // size, so the column read as ragged rather than as a column, and a
+        // balance is worth nothing if you cannot trust its final digit.
         Expanded(
-          child: Align(
-            alignment: Alignment.centerRight,
-            child: FittedBox(
-              fit: BoxFit.scaleDown,
-              alignment: Alignment.centerRight,
-              child: Text(
-                value,
-                maxLines: 1,
-                style: const TextStyle(
-                  color: AppColors.textPrimary,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 14,
-                ),
-              ),
+          flex: 6,
+          child: Text(
+            value,
+            textAlign: TextAlign.right,
+            style: const TextStyle(
+              color: AppColors.textPrimary,
+              fontWeight: FontWeight.bold,
+              fontSize: 14,
+              height: 1.3,
             ),
           ),
         ),
