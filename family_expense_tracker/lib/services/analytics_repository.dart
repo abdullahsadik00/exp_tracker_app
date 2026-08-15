@@ -155,9 +155,12 @@ class AnalyticsRepository {
 
     final trend = await _trend(db, ym, months: 6);
 
-    final forecast = isCurrent && daysElapsed > 0
-        ? (spent / daysElapsed * daysInMonth).round()
-        : spent;
+    final forecast = _project(
+      spentPaise: spent,
+      daysElapsed: daysElapsed,
+      daysInMonth: daysInMonth,
+      isCurrentMonth: isCurrent,
+    );
 
     final snapshot = AnalyticsSnapshot(
       ym: ym,
@@ -183,6 +186,56 @@ class AnalyticsRepository {
     );
 
     return snapshot.withAlert(_deriveAlert(snapshot));
+  }
+
+  /// Straight-line projection from the burn rate so far.
+  ///
+  /// The one place this arithmetic lives. A past month is not projected at all
+  /// — it returns what was actually spent, because forecasting a month that has
+  /// already ended is not a forecast.
+  static int _project({
+    required int spentPaise,
+    required int daysElapsed,
+    required int daysInMonth,
+    required bool isCurrentMonth,
+  }) {
+    if (!isCurrentMonth || daysElapsed <= 0) return spentPaise;
+    return (spentPaise / daysElapsed * daysInMonth).round();
+  }
+
+  /// Just the month-end projection, without loading the rest of the screen.
+  ///
+  /// The home screen shows this card too, and pulling the full snapshot for one
+  /// figure would run the category, people and trend queries for nothing.
+  /// Same predicates and the same [_project] as Analytics, so the two screens
+  /// can never quote different projections.
+  Future<ForecastSummary> forecast([String? month]) async {
+    final db = await _service.database;
+    final now = DateTime.now();
+    final ym = month ?? ymOf(now);
+    final isCurrent = ym == ymOf(now);
+
+    final monthStart = DateFormat('yyyy-MM').parse(ym);
+    final daysInMonth = DateTime(monthStart.year, monthStart.month + 1, 0).day;
+    final daysElapsed = isCurrent ? now.day : daysInMonth;
+
+    final spent = await _expenseTotal(db, ym);
+    final budgets = await _budgets(db);
+
+    return ForecastSummary(
+      ym: ym,
+      isCurrentMonth: isCurrent,
+      spentPaise: spent,
+      forecastPaise: _project(
+        spentPaise: spent,
+        daysElapsed: daysElapsed,
+        daysInMonth: daysInMonth,
+        isCurrentMonth: isCurrent,
+      ),
+      totalBudgetPaise: budgets.values.fold(0, (int s, int v) => s + v),
+      daysElapsed: daysElapsed,
+      daysInMonth: daysInMonth,
+    );
   }
 
   // ── Detail ──────────────────────────────────────────────────────────────────
@@ -546,6 +599,49 @@ class AnalyticsRepository {
 }
 
 // ── Value types ───────────────────────────────────────────────────────────────
+
+class ForecastSummary {
+  const ForecastSummary({
+    required this.ym,
+    required this.isCurrentMonth,
+    required this.spentPaise,
+    required this.forecastPaise,
+    required this.totalBudgetPaise,
+    required this.daysElapsed,
+    required this.daysInMonth,
+  });
+
+  final String ym;
+  final bool isCurrentMonth;
+  final int spentPaise;
+  final int forecastPaise;
+  final int totalBudgetPaise;
+  final int daysElapsed;
+  final int daysInMonth;
+
+  /// What the projection expects still to be spent before the month ends.
+  int get stillToComePaise =>
+      forecastPaise > spentPaise ? forecastPaise - spentPaise : 0;
+
+  bool get hasBudget => totalBudgetPaise > 0;
+
+  /// Budget not yet spent. Negative once the budget is already blown.
+  int get budgetRemainingPaise => totalBudgetPaise - spentPaise;
+
+  /// How far past the budget the projection lands. Zero when it doesn't.
+  int get projectedOverPaise => hasBudget && forecastPaise > totalBudgetPaise
+      ? forecastPaise - totalBudgetPaise
+      : 0;
+
+  bool get isProjectedOver => projectedOverPaise > 0;
+
+  /// Share of the projected month already spent — how far through the month's
+  /// money we are, which is not the same as how far through its days.
+  double get spentShare =>
+      forecastPaise > 0 ? (spentPaise / forecastPaise).clamp(0.0, 1.0) : 0.0;
+
+  bool get isEmpty => spentPaise == 0;
+}
 
 class TypicalSpend {
   const TypicalSpend({required this.averagePaise, required this.months});

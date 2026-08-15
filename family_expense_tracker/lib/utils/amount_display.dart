@@ -51,3 +51,7 @@ String displayAmount(double amount, {required bool hidden, int decimals = 2}) =>
 String displaySignedAmount(double amount,
         {required bool hidden, int decimals = 2}) =>
     hidden ? maskedAmount : formatSignedRupees(amount, decimals: decimals);
+
+/// Whole-rupee paise, honouring the dashboard's hide-amounts toggle.
+String displayPaise(int paise, {required bool hidden}) =>
+    hidden ? maskedAmount : formatPaise(paise);

@@ -12,6 +12,7 @@ import 'transactions_screen.dart';
 import '../theme/app_colors.dart';
 import '../utils/amount_display.dart';
 import '../widgets/balance_card.dart';
+import '../widgets/forecast_card.dart';
 import 'package:file_picker/file_picker.dart';
 import 'dart:io';
 
@@ -180,7 +181,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _buildBalanceSection(),
-              const SizedBox(height: 24),
+              const SizedBox(height: 20),
+              // Balances say where the money is; the forecast says where the
+              // month is heading. It hides itself when there is nothing spent
+              // yet to project from.
+              ForecastCard(amountsHidden: widget.amountsHidden),
+              const SizedBox(height: 20),
               _buildNeedsTaggingRow(),
               _buildTransferReviewCard(),
             ],
