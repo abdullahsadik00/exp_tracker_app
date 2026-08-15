@@ -169,6 +169,9 @@ class TransactionModel {
     bool? needsReview,
     String? reviewReason,
     int? smsBalancePaise,
+    /// `smsBalancePaise: null` means "leave it alone", so a wrong bank-reported
+    /// figure could be corrected but never removed. This is the escape hatch.
+    bool clearSmsBalance = false,
     DateTime? createdAt,
     DateTime? updatedAt,
   }) {
@@ -197,7 +200,8 @@ class TransactionModel {
       txnKind: txnKind ?? this.txnKind,
       needsReview: needsReview ?? this.needsReview,
       reviewReason: reviewReason ?? this.reviewReason,
-      smsBalancePaise: smsBalancePaise ?? this.smsBalancePaise,
+      smsBalancePaise:
+          clearSmsBalance ? null : (smsBalancePaise ?? this.smsBalancePaise),
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
     );

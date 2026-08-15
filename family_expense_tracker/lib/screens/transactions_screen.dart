@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/local_db_service.dart';
 import '../models/transaction_model.dart';
+import '../utils/amount_display.dart';
 import '../utils/money.dart';
 
 import 'add_transaction_screen.dart';
@@ -697,13 +698,33 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
             ),
           ],
         ),
-        trailing: Text(
-          '${isCredit ? '+' : '-'} ${currencyFormat.format(txn.amount)}',
-          style: TextStyle(
-            color: amountColor,
-            fontWeight: FontWeight.bold,
-            fontSize: 15,
-          ),
+        trailing: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              '${isCredit ? '+' : '-'} ${currencyFormat.format(txn.amount)}',
+              style: TextStyle(
+                color: amountColor,
+                fontWeight: FontWeight.bold,
+                fontSize: 15,
+              ),
+            ),
+            // The running ledger balance for this bank after this transaction.
+            // It has always been computed and stored; showing it is what makes
+            // a re-anchor visible as something that moved the whole account
+            // rather than just one row. Whole rupees — paise here would compete
+            // with the amount for the reader's attention.
+            if (txn.closingBalance != null)
+              Text(
+                formatRupees(txn.closingBalance!, decimals: 0),
+                style: TextStyle(
+                  color: AppColors.textSecondary.withOpacity(0.7),
+                  fontSize: 11,
+                ),
+              ),
+          ],
         ),
       ),
     );
@@ -721,6 +742,9 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
     // Seeded from the bank-reported figure, not the app's derived ledger.
     // syncLedgerBalances recomputes closingBalance on every change, so anything
     // typed into it used to be silently overwritten.
+    //
+    // When the bank quoted no balance the field is empty, and typing one now
+    // offers to re-anchor the whole account to it — see _confirmBalanceAnchor.
     final TextEditingController balanceController = TextEditingController(
         text: txn.smsBalancePaise == null
             ? ''
@@ -808,19 +832,28 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                       ),
                     ),
                     Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 40),
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
                       child: TextFormField(
                         controller: balanceController,
                         keyboardType: const TextInputType.numberWithOptions(decimal: true),
                         textAlign: TextAlign.center,
                         style: const TextStyle(fontSize: 16, color: AppColors.textSecondary, fontWeight: FontWeight.w600),
                         decoration: InputDecoration(
-                          prefixText: 'Bank-reported Balance: ₹',
+                          prefixText: 'Balance after this: ₹',
                           prefixStyle: const TextStyle(color: AppColors.textSecondary, fontSize: 16, fontWeight: FontWeight.w600),
                           border: InputBorder.none,
                           hintText: '0.00',
                           hintStyle: TextStyle(color: AppColors.textSecondary.withOpacity(0.3)),
                         ),
+                      ),
+                    ),
+                    Text(
+                      'What ${txn.bankName} actually held after this transaction. '
+                      'Saving offers to correct the whole account to match.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: AppColors.textSecondary.withOpacity(0.6),
+                        fontSize: 11,
                       ),
                     ),
                     const SizedBox(height: 32),
@@ -914,7 +947,7 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                               child: Divider(color: Colors.white10),
                             ),
                             _buildInfoRow(
-                                'Bank-reported balance',
+                                'Recorded balance',
                                 NumberFormat.currency(symbol: '₹', decimalDigits: 2)
                                     .format(Money.toDouble(txn.smsBalancePaise!)),
                                 Icons.account_balance_wallet_outlined),
@@ -1031,6 +1064,8 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                             onPressed: isSaving ? null : () async {
                               setModalState(() => isSaving = true);
                               try {
+                                final typedBalance =
+                                    Money.parsePaise(balanceController.text);
                                 await _localDbService.updateTransaction(
                                   txn.copyWith(
                                     category: selectedCategory,
@@ -1038,17 +1073,29 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                                     bankName: selectedBank,
                                     notes: notesController.text,
                                     amountPaise: Money.parsePaise(amountController.text) ?? txn.amountPaise,
-                                    smsBalancePaise: Money.parsePaise(balanceController.text),
+                                    smsBalancePaise: typedBalance,
+                                    clearSmsBalance: typedBalance == null,
                                   ),
                                 );
-                                FocusScope.of(context).unfocus();
+
+                                // Only after the edit is saved: syncLedgerBalances
+                                // has just run, so the row's closingBalance now
+                                // reflects this amount rather than the old one.
+                                final anchored = typedBalance == null
+                                    ? false
+                                    : await _offerBalanceAnchor(
+                                        context, txn.id, typedBalance);
+
                                 if (context.mounted) {
+                                  FocusScope.of(context).unfocus();
                                   Navigator.pop(context); // Close bottom sheet
                                   await _loadTransactions(); // Refresh UI without resetting scroll
                                   if (mounted) {
                                     ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text('Transaction updated successfully!'),
+                                      SnackBar(
+                                        content: Text(anchored
+                                            ? 'Balances updated across $selectedBank.'
+                                            : 'Transaction updated successfully!'),
                                         backgroundColor: Colors.green,
                                         behavior: SnackBarBehavior.floating,
                                       ),
@@ -1103,6 +1150,94 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
         );
       },
     );
+  }
+
+  /// Offers to correct the account so [txnId]'s running balance reads
+  /// [reportedPaise]. Returns whether the user accepted.
+  ///
+  /// The ledger is only ever as right as the opening balance it starts from,
+  /// and for an account whose alerts quote no balance there has never been
+  /// anything to check that guess against. A balance typed here is that
+  /// missing fact, so the account is solved backwards from it.
+  ///
+  /// Asked rather than applied. A mistyped figure moves every balance in the
+  /// account, and a genuine mismatch is evidence of a missing or duplicated
+  /// transaction — worth seeing before it is papered over.
+  Future<bool> _offerBalanceAnchor(
+      BuildContext context, String txnId, int reportedPaise) async {
+    final preview = await _localDbService.previewAnchorFromTransaction(
+        txnId, reportedPaise);
+    // No preview means no derived balance to compare against; aligned means
+    // the ledger already agrees and there is nothing to ask about.
+    if (preview == null || preview.isAligned) return false;
+    if (!context.mounted) return false;
+
+    final shortfall = preview.deltaPaise < 0;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape:
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Balance doesn\'t match',
+            style: TextStyle(color: AppColors.textPrimary, fontSize: 18)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'After this transaction the app calculates '
+              '${formatRupees(Money.toDouble(preview.derivedPaise))}, '
+              'but you entered '
+              '${formatRupees(Money.toDouble(preview.reportedPaise))}.',
+              style: const TextStyle(
+                  color: AppColors.textSecondary, fontSize: 14, height: 1.4),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Correcting it moves ${preview.bankName}\'s opening balance by '
+              '${formatSignedRupees(Money.toDouble(preview.deltaPaise))} and '
+              'updates every balance in that account, including the total.',
+              style: const TextStyle(
+                  color: AppColors.textSecondary, fontSize: 14, height: 1.4),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              shortfall
+                  ? 'A gap this direction usually means a transaction is '
+                      'recorded twice, or one was entered that never went through.'
+                  : 'A gap this direction usually means a credit is missing — '
+                      'a cash deposit, interest, or an alert that never arrived.',
+              style: TextStyle(
+                  color: AppColors.textSecondary.withOpacity(0.65),
+                  fontSize: 12,
+                  height: 1.4),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Just record it',
+                style: TextStyle(color: AppColors.textSecondary)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.accent,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12)),
+            ),
+            child: const Text('Correct balances'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return false;
+    await _localDbService.applyBalanceAnchor(preview);
+    return true;
   }
 
   void _showDeleteConfirmation(BuildContext context, TransactionModel txn) {

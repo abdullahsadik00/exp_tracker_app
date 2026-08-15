@@ -1439,12 +1439,23 @@ class LocalDbService {
   Future<void> setOpeningBalance(String bankName, int paise,
       {DateTime? openingDate}) async {
     final db = await database;
+
+    // REPLACE writes a whole row, so anything not named here is nulled. Read
+    // the columns this call has no opinion about and carry them forward, or
+    // adjusting an opening balance silently discards the account's tail digits
+    // and the opening date someone set earlier.
+    final existing = await db.query('accounts',
+        where: 'bank_name = ?', whereArgs: [bankName], limit: 1);
+    final prior = existing.isEmpty ? const <String, Object?>{} : existing.first;
+
     await db.insert(
       'accounts',
       {
         'bank_name': bankName,
+        'account_tail': prior['account_tail'],
         'opening_balance_paise': paise,
-        'opening_date': openingDate?.toIso8601String(),
+        'opening_date':
+            openingDate?.toIso8601String() ?? prior['opening_date'],
         'updated_at': DateTime.now().toIso8601String(),
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
@@ -1453,6 +1464,55 @@ class LocalDbService {
     await syncLedgerBalances(bankName);
     notifyChange();
   }
+
+  // ── Re-anchoring the ledger from a single transaction ───────────────────────
+
+  /// What it would take for [txnId]'s running balance to read [reportedPaise].
+  ///
+  /// Bank alerts often quote no balance at all, which leaves the ledger with
+  /// nothing to check itself against — the running total is then only ever as
+  /// right as the opening balance someone guessed months ago. Typing the real
+  /// balance on any transaction gives the ledger a fixed point, and the whole
+  /// account is solved backwards from it.
+  ///
+  /// The account's opening balance is the only thing that moves. Nothing about
+  /// the transactions themselves is touched, so the arithmetic between two rows
+  /// still says exactly what it said before; the entire chain just slides.
+  ///
+  /// Returns null when the row is unknown or [syncLedgerBalances] has not yet
+  /// given it a `closingBalance` to compare against.
+  Future<BalanceAnchorPreview?> previewAnchorFromTransaction(
+      String txnId, int reportedPaise) async {
+    final db = await database;
+    final rows = await db.query('transactions',
+        columns: ['bankName', 'closingBalance'],
+        where: 'id = ?',
+        whereArgs: [txnId],
+        limit: 1);
+    if (rows.isEmpty) return null;
+
+    final bank = rows.first['bankName'] as String?;
+    final derivedRupees = (rows.first['closingBalance'] as num?)?.toDouble();
+    if (bank == null || derivedRupees == null) return null;
+
+    final derivedPaise = Money.fromDouble(derivedRupees);
+    final openingPaise = await openingBalancePaise(bank);
+
+    return BalanceAnchorPreview(
+      bankName: bank,
+      derivedPaise: derivedPaise,
+      reportedPaise: reportedPaise,
+      currentOpeningPaise: openingPaise,
+    );
+  }
+
+  /// Applies [preview], shifting the account's opening balance so the anchored
+  /// transaction's running balance lands on the reported figure.
+  ///
+  /// [setOpeningBalance] recomputes the bank's ledger and notifies listeners,
+  /// so every balance on screen follows from this one write.
+  Future<void> applyBalanceAnchor(BalanceAnchorPreview preview) =>
+      setOpeningBalance(preview.bankName, preview.newOpeningPaise);
 
   Future<List<Map<String, dynamic>>> getAccounts() async {
     final db = await database;
@@ -1842,6 +1902,41 @@ class BatchInsertResult {
   const BatchInsertResult(this.added, this.duplicates, this.suppressedByTombstone);
 
   int get total => added + duplicates + suppressedByTombstone;
+}
+
+/// What re-anchoring an account's ledger to a balance stated on one
+/// transaction would cost, worked out before anything is written.
+///
+/// Deliberately inert: it computes and reports, and only
+/// [LocalDbService.applyBalanceAnchor] acts on it. A mistyped balance rewrites
+/// every figure in the account, so the user sees the shift before it happens.
+class BalanceAnchorPreview {
+  /// The account whose opening balance would move.
+  final String bankName;
+
+  /// The running balance the ledger currently derives at the anchored row.
+  final int derivedPaise;
+
+  /// The balance the user says the account actually held at that point.
+  final int reportedPaise;
+
+  final int currentOpeningPaise;
+
+  const BalanceAnchorPreview({
+    required this.bankName,
+    required this.derivedPaise,
+    required this.reportedPaise,
+    required this.currentOpeningPaise,
+  });
+
+  /// Positive means the account really holds more than the ledger explains.
+  int get deltaPaise => reportedPaise - derivedPaise;
+
+  /// Matches [ReconciliationResult.isReconciled] — a paisa of slack for rows
+  /// imported from rounded statement values.
+  bool get isAligned => deltaPaise.abs() <= 1;
+
+  int get newOpeningPaise => currentOpeningPaise + deltaPaise;
 }
 
 /// A per-account comparison of the derived balance against the bank's own

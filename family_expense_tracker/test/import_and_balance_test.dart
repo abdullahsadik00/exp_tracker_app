@@ -336,6 +336,155 @@ void main() {
     });
   });
 
+  group('anchoring the ledger to a stated balance', () {
+    /// Two SBI transactions with no balance quoted anywhere, which is the case
+    /// this exists for: nothing in the ledger can be checked against reality.
+    Future<List<TransactionModel>> seedUnbalancedSbi() async {
+      final importer = TransactionImportService(
+        reader: FakeSmsReader([
+          sms('A/c XX8724 debited by Rs.500.00 on 15-01-26 Ref No 111111111111',
+              when: DateTime(2026, 1, 15, 10)),
+          sms('A/c XX8724 debited by Rs.200.00 on 16-01-26 Ref No 222222222222',
+              when: DateTime(2026, 1, 16, 10)),
+        ]),
+      );
+      await importer.sync();
+      final all = await db.getAllTransactions();
+      // getAllTransactions is newest-first; oldest-first reads better here.
+      return all.reversed.toList();
+    }
+
+    test('anchoring the newest transaction sets the account balance exactly',
+        () async {
+      final txns = await seedUnbalancedSbi();
+      expect(await db.balanceByBankPaise(), {'SBI': -70000});
+
+      final preview = await db.previewAnchorFromTransaction(
+          txns.last.id, Money.parsePaise('9300')!);
+
+      expect(preview, isNotNull);
+      expect(preview!.bankName, 'SBI');
+      expect(preview.derivedPaise, -70000);
+      expect(preview.isAligned, isFalse);
+      expect(preview.newOpeningPaise, Money.parsePaise('10000'));
+
+      await db.applyBalanceAnchor(preview);
+
+      expect((await db.balanceByBankPaise())['SBI'], Money.parsePaise('9300'));
+      expect(await db.currentBalancePaise(), Money.parsePaise('9300'));
+    });
+
+    test('anchoring an older transaction leaves later movements on top',
+        () async {
+      final txns = await seedUnbalancedSbi();
+
+      // The first transaction left the account at 9500; the second (-200) has
+      // not happened yet at that point, so the account must end at 9300.
+      final preview = await db.previewAnchorFromTransaction(
+          txns.first.id, Money.parsePaise('9500')!);
+      await db.applyBalanceAnchor(preview!);
+
+      final after = await db.getAllTransactions();
+      final anchored = after.firstWhere((t) => t.id == txns.first.id);
+      expect(Money.fromDouble(anchored.closingBalance!),
+          Money.parsePaise('9500'));
+      expect((await db.balanceByBankPaise())['SBI'], Money.parsePaise('9300'));
+    });
+
+    test('a failed transaction after the anchor moves nothing', () async {
+      final importer = TransactionImportService(
+        reader: FakeSmsReader([
+          sms('A/c XX8724 debited by Rs.500.00 on 15-01-26 Ref No 111111111111',
+              when: DateTime(2026, 1, 15, 10)),
+          sms('Rs.900.00 debit from A/c XX8724 failed. Ref No 333333333333',
+              when: DateTime(2026, 1, 16, 10)),
+        ]),
+      );
+      await importer.sync();
+      final oldest = (await db.getAllTransactions()).last;
+
+      final preview = await db.previewAnchorFromTransaction(
+          oldest.id, Money.parsePaise('9500')!);
+      await db.applyBalanceAnchor(preview!);
+
+      expect((await db.balanceByBankPaise())['SBI'], Money.parsePaise('9500'));
+    });
+
+    test('anchoring one account leaves the other untouched', () async {
+      await db.setOpeningBalance('BoB', 200000);
+      final importer = TransactionImportService(
+        reader: FakeSmsReader([
+          sms('A/c XX8724 debited by Rs.500.00 on 15-01-26 Ref No 111111111111'),
+          sms('Rs.300.00 debited from A/c XX9999 on 15-01-26 '
+              'Ref No 444444444444 -Bank of Baroda', sender: 'JD-BOBSMS'),
+        ]),
+      );
+      await importer.sync();
+
+      final sbi = (await db.getAllTransactions())
+          .firstWhere((t) => t.bankName == 'SBI');
+      final preview = await db.previewAnchorFromTransaction(
+          sbi.id, Money.parsePaise('9500')!);
+      await db.applyBalanceAnchor(preview!);
+
+      final byBank = await db.balanceByBankPaise();
+      expect(byBank['SBI'], Money.parsePaise('9500'));
+      expect(byBank['BoB'], 200000 - 30000);
+    });
+
+    test('a balance the ledger already agrees with is a no-op', () async {
+      await db.setOpeningBalance('SBI', Money.parsePaise('10000')!);
+      final txns = await seedUnbalancedSbi();
+
+      final preview = await db.previewAnchorFromTransaction(
+          txns.last.id, Money.parsePaise('9300')!);
+
+      expect(preview!.isAligned, isTrue);
+      expect(preview.deltaPaise, 0);
+      expect(preview.newOpeningPaise, await db.openingBalancePaise('SBI'));
+    });
+
+    test('an unknown transaction previews nothing', () async {
+      expect(await db.previewAnchorFromTransaction('nope', 100), isNull);
+    });
+
+    test('setting an opening balance keeps the account tail', () async {
+      final raw = await db.database;
+      await raw.insert('accounts', {
+        'bank_name': 'SBI',
+        'account_tail': '8724',
+        'opening_balance_paise': 0,
+      });
+
+      await db.setOpeningBalance('SBI', 500000);
+
+      final row = (await db.getAccounts()).firstWhere(
+          (a) => a['bank_name'] == 'SBI');
+      expect(row['account_tail'], '8724');
+      expect(row['opening_balance_paise'], 500000);
+    });
+
+    test('a recorded balance can be cleared again', () async {
+      final txns = await seedUnbalancedSbi();
+      await db.updateTransaction(txns.first.copyWith(smsBalancePaise: 950000));
+      expect(
+          (await db.getAllTransactions())
+              .firstWhere((t) => t.id == txns.first.id)
+              .smsBalancePaise,
+          950000);
+
+      final withBalance = (await db.getAllTransactions())
+          .firstWhere((t) => t.id == txns.first.id);
+      await db.updateTransaction(withBalance.copyWith(clearSmsBalance: true));
+
+      expect(
+          (await db.getAllTransactions())
+              .firstWhere((t) => t.id == txns.first.id)
+              .smsBalancePaise,
+          isNull);
+    });
+  });
+
   group('deleted transactions stay deleted', () {
     test('a deleted SMS transaction is not resurrected by the next sync',
         () async {

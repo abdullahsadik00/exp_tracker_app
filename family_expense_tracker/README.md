@@ -118,7 +118,11 @@ Money you move between your own accounts is income on one side and an expense on
 
 ### Running Balance Ledger
 
-Each transaction stores a `closingBalance`. After any insert/update/delete, `syncLedgerBalances()` recomputes balances **incrementally** from the affected date forward (per bank), so the ledger stays consistent without a full recompute.
+Each transaction stores a `closingBalance`. After any insert/update/delete, `syncLedgerBalances()` recomputes that bank's balances from its opening balance forward, so the ledger stays consistent. The figure is shown under each row's amount in the transactions list.
+
+A balance is only ever as right as the opening balance it starts from, and plenty of bank alerts quote no balance at all — so there is often nothing to check that starting figure against. Typing the real balance into **Balance after this** on any transaction offers to fix that: `previewAnchorFromTransaction()` works out what the account's opening balance would have to be for that row to read the stated figure, and applying it shifts the opening balance so every balance in the account — and the dashboard total — follows.
+
+Only the opening balance moves; no transaction is edited, so the arithmetic between any two rows is unchanged. It is offered rather than applied, because a mismatch is usually evidence of a missing or duplicated transaction and worth seeing before it is smoothed over.
 
 ### Data Safety
 
