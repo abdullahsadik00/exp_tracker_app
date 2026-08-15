@@ -1621,7 +1621,7 @@ class LocalDbService {
   /// same rupees twice.
   Future<int> ownAccountsBalancePaise() async {
     final byBank = await balanceByBankPaise();
-    return ownAccounts.fold(0, (sum, bank) => sum + (byBank[bank] ?? 0));
+    return ownAccounts.fold<int>(0, (sum, bank) => sum + (byBank[bank] ?? 0));
   }
 
   Future<Map<String, int>> balanceByBankPaise() async {
