@@ -8,6 +8,7 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ### Added
 - **A balance typed on a transaction can now correct the whole account.** Many bank alerts quote no balance, so the ledger had nothing to check its opening balance against and the "Bank-reported Balance" field changed nothing on screen. Entering what the account actually held after a transaction now offers to shift that account's opening balance to match, which updates every balance in the account and the dashboard total. Only the opening balance moves — no transaction is edited — and it is confirmed rather than applied silently, since a mismatch is usually evidence of a missing or duplicated transaction.
+- **Transactions no categorization rule matched are now surfaced.** A new **No rule matched** section on Sync & Reconciliation lists imported transactions still sitting on the default category or person. They parsed successfully, so they never appeared in the review queue or the unparsed list, and the only way to find them was to scroll the ledger looking for "Other" — meanwhile every future message of the same shape landed the same way and analytics attributed real spending to a bucket meaning "unknown". Hand-added transactions are excluded: leaving one as Other was a choice, not a gap.
 - **The running balance is shown under each transaction.** `closingBalance` had been computed and stored on every row since the ledger was built, but appeared nowhere outside CSV export.
 
 ### Fixed

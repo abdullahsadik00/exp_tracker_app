@@ -7,6 +7,7 @@ import '../services/native_sms_queue.dart';
 import '../services/transaction_import_service.dart';
 import '../theme/app_colors.dart';
 import '../utils/money.dart';
+import 'categorization_rules_screen.dart';
 
 /// SMS import and balance reconciliation.
 ///
@@ -34,6 +35,8 @@ class _SmsSyncScreenState extends State<SmsSyncScreen> {
       _db.reconciliationStream;
   late final Stream<List<TransactionModel>> _needsReviewStream =
       _db.needsReviewStream;
+  late final Stream<List<TransactionModel>> _uncategorizedStream =
+      _db.uncategorizedStream;
 
   bool _syncing = false;
   ImportProgress? _progress;
@@ -137,6 +140,10 @@ class _SmsSyncScreenState extends State<SmsSyncScreen> {
           _sectionTitle('Needs Review'),
           const SizedBox(height: 12),
           _reviewSection(),
+          const SizedBox(height: 24),
+          _sectionTitle('No rule matched'),
+          const SizedBox(height: 12),
+          _uncategorizedSection(),
           const SizedBox(height: 24),
           _sectionTitle('Messages that could not be read'),
           const SizedBox(height: 12),
@@ -839,6 +846,119 @@ class _SmsSyncScreenState extends State<SmsSyncScreen> {
       );
 
   // ── Unparsed ────────────────────────────────────────────────────────────────
+
+  // ── Rule coverage ───────────────────────────────────────────────────────────
+
+  /// Transactions that imported cleanly but no categorization rule recognised.
+  ///
+  /// They are invisible everywhere else: parsing succeeded, so they never reach
+  /// the review queue or the unparsed list, and they only stand out in the
+  /// ledger if you happen to notice a run of "Other". Every future message of
+  /// the same shape will land the same way until a rule exists for it, so the
+  /// list is really a list of rules that are missing.
+  Widget _uncategorizedSection() {
+    return StreamBuilder<List<TransactionModel>>(
+      stream: _uncategorizedStream,
+      builder: (context, snapshot) {
+        final rows = snapshot.data;
+        if (rows == null) return _card(child: const _Loading());
+        if (rows.isEmpty) {
+          return _card(
+            child: const Text(
+                'Every imported transaction was matched by a rule.',
+                style: TextStyle(color: AppColors.textSecondary, fontSize: 12)),
+          );
+        }
+        return _card(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${rows.length} imported transaction(s) kept the default '
+                'category or person because no keyword matched. Adding a rule '
+                'for them also fixes every past transaction like them.',
+                style: const TextStyle(
+                    color: AppColors.textSecondary, fontSize: 12, height: 1.4),
+              ),
+              const SizedBox(height: 12),
+              for (final tx in rows)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '${tx.bankName} · '
+                              '${DateFormat('d MMM yyyy').format(tx.date)}',
+                              style: const TextStyle(
+                                  color: AppColors.textSecondary, fontSize: 10),
+                            ),
+                            Text(
+                              tx.description,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  color: AppColors.textPrimary, fontSize: 12),
+                            ),
+                            // Naming what is actually missing saves opening the
+                            // row to find out which half needs a rule.
+                            Text(
+                              _missingFields(tx),
+                              style: TextStyle(
+                                  color: AppColors.textSecondary
+                                      .withOpacity(0.7),
+                                  fontSize: 10),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Text(
+                        '${tx.type == 'credit' ? '+' : '-'} '
+                        '${_currency.format(tx.amount)}',
+                        style: TextStyle(
+                          color: tx.type == 'credit'
+                              ? AppColors.credit
+                              : AppColors.debit,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              const SizedBox(height: 4),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                          builder: (_) => const CategorizationRulesScreen())),
+                  icon: const Icon(Icons.rule_folder_outlined, size: 18),
+                  label: const Text('Add categorization rules'),
+                  style: TextButton.styleFrom(
+                      foregroundColor: AppColors.accent),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  String _missingFields(TransactionModel tx) {
+    final missing = <String>[
+      if (tx.category == 'Other') 'category',
+      if (tx.assignedTo == 'Unassigned') 'person',
+    ];
+    return missing.isEmpty ? '' : 'No ${missing.join(' or ')} matched';
+  }
 
   Widget _unparsedSection() {
     return FutureBuilder<List<Map<String, dynamic>>>(

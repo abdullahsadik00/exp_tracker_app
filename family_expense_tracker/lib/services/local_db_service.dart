@@ -588,6 +588,48 @@ class LocalDbService {
     return updated;
   }
 
+  /// Imported transactions the rules had nothing to say about — still sitting
+  /// on the defaults `analyzeTransaction` hands out when nothing matched.
+  ///
+  /// These are the blind spots in the rule set. Nothing flags them today: they
+  /// import successfully, so they never reach the review queue or the unparsed
+  /// list, and the only way to find them is to scroll the ledger looking for
+  /// "Other". Meanwhile every future message of the same shape lands the same
+  /// way, and analytics quietly attributes real spending to a bucket that
+  /// means "unknown".
+  ///
+  /// Restricted to imported rows. A manually added transaction was categorised
+  /// by the person adding it, so leaving it as Other was a choice rather than
+  /// a gap, and nagging about it would never stop.
+  Future<List<TransactionModel>> getUncategorizedTransactions(
+      {int limit = 50}) async {
+    final db = await database;
+    final maps = await db.query(
+      'transactions',
+      where: "source IN (?, ?, ?) AND $notFailed "
+          "AND ((category IS NULL OR category = 'Other') "
+          "OR (assignedTo IS NULL OR assignedTo = 'Unassigned'))",
+      whereArgs: [TxnSource.sms, TxnSource.pdf, TxnSource.excel],
+      orderBy: 'date DESC, id DESC',
+      limit: limit,
+    );
+    return maps.map((m) => TransactionModel.fromJson(m)).toList();
+  }
+
+  /// How many imported transactions no rule has an opinion about, ignoring the
+  /// display limit on [getUncategorizedTransactions].
+  Future<int> uncategorizedCount() async {
+    final db = await database;
+    final r = await db.rawQuery(
+      "SELECT COUNT(*) as c FROM transactions "
+      "WHERE source IN (?, ?, ?) AND $notFailed "
+      "AND ((category IS NULL OR category = 'Other') "
+      "OR (assignedTo IS NULL OR assignedTo = 'Unassigned'))",
+      [TxnSource.sms, TxnSource.pdf, TxnSource.excel],
+    );
+    return (r.first['c'] as num?)?.toInt() ?? 0;
+  }
+
   Future<void> insertCategorizationRule(CategorizationRule rule) async {
     final db = await database;
     await db.insert('categorization_rules', rule.toMap()..remove('id'));
@@ -1784,6 +1826,9 @@ class LocalDbService {
 
   Stream<List<TransactionModel>> get needsReviewStream =>
       _streamOf('needsReview', getNeedsReviewTransactions);
+
+  Stream<List<TransactionModel>> get uncategorizedStream =>
+      _streamOf('uncategorized', getUncategorizedTransactions);
 }
 
 /// One query, one subscription to `onChange`, any number of widgets.

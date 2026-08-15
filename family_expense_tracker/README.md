@@ -112,6 +112,8 @@ flutter run
 
 The first match for each field (bank / assignee / category) wins, and any uncategorized transaction falls back to sensible defaults. Rules are fully editable in-app via the **Categorization Rules** screen and persisted in SQLite, so categorization improves over time without code changes.
 
+Transactions no rule recognised are listed under **No rule matched** on the Sync & Reconciliation screen. They import cleanly, so nothing else flags them — they never reach the review queue or the unparsed list — and every future message of the same shape lands the same way until a rule exists. The list is really a list of rules that are missing; adding one and re-applying it fixes the past rows too.
+
 ### Transfer Detection
 
 Money you move between your own accounts is income on one side and an expense on the other — counting both would double-count. `LocalDbService.getPotentialTransferPairs()` finds candidate pairs (equal amount, opposite type, different banks, within ~48h) and the **Transfer Review** screen lets you confirm or dismiss them. Confirmed transfers are excluded from spending/income analytics.

@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:family_expense_tracker/models/transaction_model.dart';
+import 'package:family_expense_tracker/services/categorization_service.dart';
 import 'package:family_expense_tracker/services/local_db_service.dart';
 import 'package:family_expense_tracker/services/native_sms_queue.dart';
 import 'package:family_expense_tracker/services/sms_reader.dart';
@@ -482,6 +483,82 @@ void main() {
               .firstWhere((t) => t.id == txns.first.id)
               .smsBalancePaise,
           isNull);
+    });
+  });
+
+  group('rule coverage', () {
+    test('an import no rule matched is reported as uncategorized', () async {
+      final importer = TransactionImportService(
+        reader: FakeSmsReader([
+          sms('A/c XX8724 debited by Rs.500.00 on 15-01-26 '
+              'trf to ZZQQXX Refno 111111111111'),
+        ]),
+      );
+      await importer.sync();
+
+      final uncategorized = await db.getUncategorizedTransactions();
+      expect(uncategorized, hasLength(1));
+      expect(uncategorized.first.category, 'Other');
+      expect(await db.uncategorizedCount(), 1);
+    });
+
+    test('a matched import is not reported', () async {
+      // BLINKIT is one of the seeded rules, so this needs no setup — and a
+      // matched category promotes 'Unassigned' to 'Me', clearing both halves.
+      final importer = TransactionImportService(
+        reader: FakeSmsReader([
+          sms('A/c XX8724 debited by Rs.500.00 on 15-01-26 '
+              'trf to BLINKIT Refno 111111111111'),
+        ]),
+      );
+      await importer.sync();
+
+      expect(await db.getUncategorizedTransactions(), isEmpty);
+      expect(await db.uncategorizedCount(), 0);
+    });
+
+    test('adding a rule afterwards clears the row from the list', () async {
+      final importer = TransactionImportService(
+        reader: FakeSmsReader([
+          sms('A/c XX8724 debited by Rs.500.00 on 15-01-26 '
+              'trf to QQWWEE Refno 111111111111'),
+        ]),
+      );
+      await importer.sync();
+      expect(await db.uncategorizedCount(), 1);
+
+      await db.insertCategorizationRule(const CategorizationRule(
+          keyword: 'QQWWEE', category: 'Groceries', assignedTo: 'Me'));
+      await db.applyRulesToExisting(overwriteExisting: false);
+
+      expect(await db.uncategorizedCount(), 0);
+    });
+
+    test('a hand-added transaction is never nagged about', () async {
+      await db.insertTransaction(TransactionModel(
+        id: 'manual-1',
+        amountPaise: 50000,
+        type: 'debit',
+        bankName: 'SBI',
+        assignedTo: 'Unassigned',
+        category: 'Other',
+        description: 'Cash',
+        date: at,
+        rawSmsText: '',
+      ));
+
+      expect(await db.uncategorizedCount(), 0);
+    });
+
+    test('a failed transaction is not counted', () async {
+      final importer = TransactionImportService(
+        reader: FakeSmsReader([
+          sms('Rs.25.00 debit from A/c XX8724 failed. Ref No 333333333333'),
+        ]),
+      );
+      await importer.sync();
+
+      expect(await db.uncategorizedCount(), 0);
     });
   });
 
