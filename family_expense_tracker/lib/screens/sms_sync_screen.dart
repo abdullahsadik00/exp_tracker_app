@@ -499,6 +499,20 @@ class _SmsSyncScreenState extends State<SmsSyncScreen> {
   }
 
   Widget _reviewTile(TransactionModel tx) {
+    // The tile shows the parser's one-line reading of the message. Deciding
+    // whether that reading is right needs the message itself, so the whole
+    // card opens it.
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () => _showReviewDetail(tx),
+        borderRadius: BorderRadius.circular(20),
+        child: _reviewTileBody(tx),
+      ),
+    );
+  }
+
+  Widget _reviewTileBody(TransactionModel tx) {
     return _card(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -537,40 +551,292 @@ class _SmsSyncScreenState extends State<SmsSyncScreen> {
                     color: Colors.orangeAccent, fontSize: 11, height: 1.4)),
           ],
           const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
+          Row(
             children: [
-              TextButton(
-                onPressed: () => _db.resolveReview(tx.id),
-                child: const Text('Looks right'),
-              ),
-              if (tx.status == TxnStatus.failed)
-                TextButton(
-                  onPressed: () async {
-                    await _db.setTransactionStatus(tx.id, TxnStatus.posted);
-                    await _db.resolveReview(tx.id);
-                  },
-                  child: const Text('Count it'),
-                ),
-              if (tx.status != TxnStatus.failed)
-                TextButton(
-                  onPressed: () async {
-                    await _db.setTransactionStatus(tx.id, TxnStatus.failed);
-                    await _db.resolveReview(tx.id);
-                  },
-                  child: const Text("Don't count"),
-                ),
-              TextButton(
-                onPressed: () => _db.deleteTransaction(tx.id),
-                style: TextButton.styleFrom(foregroundColor: AppColors.debit),
-                child: const Text('Delete'),
-              ),
+              Expanded(child: _reviewActions(tx)),
+              Icon(Icons.chevron_right_rounded,
+                  size: 18, color: AppColors.textSecondary.withOpacity(0.7)),
             ],
           ),
+          Text('Tap to read the original message',
+              style: TextStyle(
+                  color: AppColors.textSecondary.withOpacity(0.6),
+                  fontSize: 10)),
         ],
       ),
     );
   }
+
+  /// The same three decisions wherever they appear. [onDone] lets the sheet
+  /// close itself after acting; the tile has nothing to close.
+  Widget _reviewActions(TransactionModel tx, {VoidCallback? onDone}) {
+    Future<void> run(Future<void> Function() action) async {
+      await action();
+      onDone?.call();
+    }
+
+    return Wrap(
+      spacing: 8,
+      children: [
+        TextButton(
+          onPressed: () => run(() => _db.resolveReview(tx.id)),
+          child: const Text('Looks right'),
+        ),
+        if (tx.status == TxnStatus.failed)
+          TextButton(
+            onPressed: () => run(() async {
+              await _db.setTransactionStatus(tx.id, TxnStatus.posted);
+              await _db.resolveReview(tx.id);
+            }),
+            child: const Text('Count it'),
+          ),
+        if (tx.status != TxnStatus.failed)
+          TextButton(
+            onPressed: () => run(() async {
+              await _db.setTransactionStatus(tx.id, TxnStatus.failed);
+              await _db.resolveReview(tx.id);
+            }),
+            child: const Text("Don't count"),
+          ),
+        TextButton(
+          onPressed: () => run(() => _db.deleteTransaction(tx.id)),
+          style: TextButton.styleFrom(foregroundColor: AppColors.debit),
+          child: const Text('Delete'),
+        ),
+      ],
+    );
+  }
+
+  /// Everything needed to judge one flagged transaction: why it was flagged,
+  /// what the parser made of it, and the message it was made from — verbatim
+  /// and selectable, so the decision is made against the original rather than
+  /// against a one-line summary of it.
+  void _showReviewDetail(TransactionModel tx) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: AppColors.surface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (sheetContext) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.8,
+        maxChildSize: 0.95,
+        minChildSize: 0.5,
+        builder: (context, controller) => ListView(
+          controller: controller,
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+          children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(tx.description,
+                      style: const TextStyle(
+                          color: AppColors.textPrimary,
+                          fontSize: 17,
+                          fontWeight: FontWeight.bold)),
+                ),
+                const SizedBox(width: 12),
+                Text(
+                  '${tx.type == 'credit' ? '+' : '-'}${_currency.format(tx.amount)}',
+                  style: TextStyle(
+                      color: tx.type == 'credit'
+                          ? AppColors.credit
+                          : AppColors.debit,
+                      fontSize: 17,
+                      fontWeight: FontWeight.bold),
+                ),
+              ],
+            ),
+
+            if (tx.reviewReason != null) ...[
+              const SizedBox(height: 16),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.orangeAccent.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(12),
+                  border:
+                      Border.all(color: Colors.orangeAccent.withOpacity(0.3)),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(Icons.help_outline,
+                        color: Colors.orangeAccent, size: 16),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(tx.reviewReason!,
+                          style: const TextStyle(
+                              color: Colors.orangeAccent,
+                              fontSize: 12,
+                              height: 1.4)),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+
+            const SizedBox(height: 20),
+            _sheetLabel('What was read from it'),
+            const SizedBox(height: 8),
+            _row('Amount', _currency.format(tx.amount), bold: true),
+            _row('Direction', tx.type == 'credit' ? 'Money in' : 'Money out'),
+            _row('Account', tx.bankName),
+            _row('Date',
+                DateFormat('d MMM yyyy, h:mm a').format(tx.date)),
+            if (tx.accountTail != null) _row('Account no.', '••••${tx.accountTail}'),
+            if (tx.upiTransactionId != null)
+              _row('UPI reference', tx.upiTransactionId!),
+            if (tx.referenceId != null) _row('Bank reference', tx.referenceId!),
+            if (tx.smsBalancePaise != null)
+              _row('Bank-reported balance',
+                  _currency.format(Money.toDouble(tx.smsBalancePaise!))),
+            _row(
+              'Counts towards balance',
+              tx.status == TxnStatus.failed ? 'No — marked failed' : 'Yes',
+              valueColor: tx.status == TxnStatus.failed
+                  ? AppColors.debit
+                  : AppColors.credit,
+            ),
+
+            const SizedBox(height: 20),
+            _sheetLabel('Original message'),
+            const SizedBox(height: 8),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: AppColors.background,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.white.withOpacity(0.06)),
+              ),
+              child: tx.rawSmsText.trim().isEmpty
+                  ? const Text(
+                      'This transaction was entered by hand, so there is no '
+                      'original message to compare against.',
+                      style: TextStyle(
+                          color: AppColors.textSecondary,
+                          fontSize: 12,
+                          height: 1.5))
+                  : SelectableText(
+                      tx.rawSmsText,
+                      style: const TextStyle(
+                          color: AppColors.textPrimary,
+                          fontSize: 13,
+                          height: 1.5),
+                    ),
+            ),
+            if (tx.smsSender != null) ...[
+              const SizedBox(height: 6),
+              Text('From ${tx.smsSender}',
+                  style: const TextStyle(
+                      color: AppColors.textSecondary, fontSize: 11)),
+            ],
+
+            const SizedBox(height: 20),
+            _sheetLabel('Your decision'),
+            _reviewActions(tx, onDone: () {
+              if (Navigator.canPop(sheetContext)) Navigator.pop(sheetContext);
+            }),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// A message the parser could not use, shown whole.
+  void _showRawMessage({
+    required String? sender,
+    required String? receivedAt,
+    required String body,
+  }) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: AppColors.surface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (_) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        maxChildSize: 0.95,
+        minChildSize: 0.3,
+        builder: (context, controller) => ListView(
+          controller: controller,
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+          children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            Text(sender ?? 'Unknown sender',
+                style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold)),
+            const SizedBox(height: 2),
+            Text(_shortDate(receivedAt),
+                style: const TextStyle(
+                    color: AppColors.textSecondary, fontSize: 12)),
+            const SizedBox(height: 20),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: AppColors.background,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.white.withOpacity(0.06)),
+              ),
+              child: SelectableText(
+                body,
+                style: const TextStyle(
+                    color: AppColors.textPrimary, fontSize: 13, height: 1.5),
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'This message was not turned into a transaction. If it is a '
+              'real payment, add it by hand from the Add tab.',
+              style: TextStyle(
+                  color: AppColors.textSecondary, fontSize: 12, height: 1.4),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _sheetLabel(String text) => Text(
+        text.toUpperCase(),
+        style: const TextStyle(
+          color: AppColors.textSecondary,
+          fontSize: 11,
+          fontWeight: FontWeight.bold,
+          letterSpacing: 1.1,
+        ),
+      );
 
   // ── Unparsed ────────────────────────────────────────────────────────────────
 
@@ -602,21 +868,31 @@ class _SmsSyncScreenState extends State<SmsSyncScreen> {
               for (final row in rows)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 10),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '${row['sender'] ?? 'Unknown'} · '
-                        '${_shortDate(row['received_at'] as String?)}',
-                        style: const TextStyle(
-                            color: AppColors.textSecondary, fontSize: 10),
-                      ),
-                      Text((row['body'] as String? ?? ''),
-                          maxLines: 3,
-                          overflow: TextOverflow.ellipsis,
+                  // Three lines is rarely the whole message, and the part that
+                  // says what the payment was for is usually in the part that
+                  // got cut.
+                  child: InkWell(
+                    onTap: () => _showRawMessage(
+                      sender: row['sender'] as String?,
+                      receivedAt: row['received_at'] as String?,
+                      body: row['body'] as String? ?? '',
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '${row['sender'] ?? 'Unknown'} · '
+                          '${_shortDate(row['received_at'] as String?)}',
                           style: const TextStyle(
-                              color: AppColors.textPrimary, fontSize: 12)),
-                    ],
+                              color: AppColors.textSecondary, fontSize: 10),
+                        ),
+                        Text((row['body'] as String? ?? ''),
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                color: AppColors.textPrimary, fontSize: 12)),
+                      ],
+                    ),
                   ),
                 ),
             ],
@@ -648,17 +924,36 @@ class _SmsSyncScreenState extends State<SmsSyncScreen> {
       {Color? valueColor, bool bold = false}) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
+      // Both halves were unconstrained, so a six-figure balance or a full UPI
+      // reference overflowed the row and lost its last character off the right
+      // edge. The value scales down into whatever room is left instead — a
+      // balance is worth nothing if you cannot trust its final digit.
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(label,
-              style: const TextStyle(
-                  color: AppColors.textSecondary, fontSize: 12)),
-          Text(value,
-              style: TextStyle(
-                  color: valueColor ?? AppColors.textPrimary,
-                  fontSize: 13,
-                  fontWeight: bold ? FontWeight.bold : FontWeight.w500)),
+          Flexible(
+            child: Text(label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                    color: AppColors.textSecondary, fontSize: 12)),
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerRight,
+                child: Text(value,
+                    maxLines: 1,
+                    style: TextStyle(
+                        color: valueColor ?? AppColors.textPrimary,
+                        fontSize: 13,
+                        fontWeight:
+                            bold ? FontWeight.bold : FontWeight.w500)),
+              ),
+            ),
+          ),
         ],
       ),
     );
