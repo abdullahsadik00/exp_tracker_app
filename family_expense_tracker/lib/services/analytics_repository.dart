@@ -148,7 +148,7 @@ class AnalyticsRepository {
     final people = await _peopleBreakdown(db, ym, prevYm,
         isCurrent: isCurrent, daysElapsed: daysElapsed, monthTotal: spent);
 
-    final trend = await _trend(db, ym);
+    final trend = await _trend(db, ym, months: 6);
 
     final forecast = isCurrent && daysElapsed > 0
         ? (spent / daysElapsed * daysInMonth).round()
@@ -375,10 +375,13 @@ class AnalyticsRepository {
   /// Monthly totals ending at [ym] inclusive, oldest first. Months with no
   /// transactions at all are returned with a null amount so the chart can show
   /// a gap instead of claiming ₹0 was spent.
+  ///
+  /// Six months at both scopes: enough to see a direction, few enough that
+  /// every month keeps its own axis label on a phone.
   Future<List<TrendPoint>> _trend(
     Database db,
     String ym, {
-    int months = 12,
+    int months = 6,
     String? category,
   }) async {
     final from = _shift(ym, -(months - 1));
