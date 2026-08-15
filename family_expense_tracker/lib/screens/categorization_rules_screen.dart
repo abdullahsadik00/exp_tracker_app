@@ -15,6 +15,7 @@ class _CategorizationRulesScreenState extends State<CategorizationRulesScreen> {
   final LocalDbService _db = LocalDbService();
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = '';
+  bool _isApplying = false;
 
   // Read once: typing in the search box rebuilds this screen on every
   // keystroke, and a stream created in build() would re-query each time.
@@ -37,6 +38,14 @@ class _CategorizationRulesScreenState extends State<CategorizationRulesScreen> {
         backgroundColor: Colors.transparent,
         elevation: 0,
         iconTheme: const IconThemeData(color: AppColors.textPrimary),
+        actions: [
+          IconButton(
+            tooltip: 'Apply rules to existing transactions',
+            icon: const Icon(Icons.playlist_add_check_rounded,
+                color: AppColors.accent),
+            onPressed: _isApplying ? null : _showApplyRulesDialog,
+          ),
+        ],
       ),
       body: Column(
         children: [
@@ -108,6 +117,103 @@ class _CategorizationRulesScreenState extends State<CategorizationRulesScreen> {
         label: const Text('Add Rule', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
       ),
     );
+  }
+
+  /// Rules run when a transaction is imported, so editing them leaves
+  /// everything already in the app untouched. This is how the user applies
+  /// them to what is already there.
+  Future<void> _showApplyRulesDialog() async {
+    final overwrite = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        title: const Text('Apply rules to existing transactions',
+            style: TextStyle(color: AppColors.textPrimary)),
+        content: const Text(
+          'Rules normally run only when a transaction is imported. '
+          'This re-runs them over transactions you already have.\n\n'
+          'Which account a transaction belongs to is never changed.',
+          style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel',
+                style: TextStyle(color: AppColors.textSecondary)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Re-apply to all',
+                style: TextStyle(color: Colors.amber)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.accent),
+            child: const Text('Only fill gaps',
+                style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (overwrite == null || !mounted) return;
+
+    // "Re-apply to all" cannot tell a category a rule set from one the user
+    // chose by hand, so it is worth one more tap before it replaces work.
+    if (overwrite) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppColors.surface,
+          title: const Text('Overwrite manual changes?',
+              style: TextStyle(color: AppColors.textPrimary)),
+          content: const Text(
+            'Any category or person you set by hand will be replaced where a '
+            'rule matches. This cannot be undone.',
+            style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel',
+                  style: TextStyle(color: AppColors.textSecondary)),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: ElevatedButton.styleFrom(backgroundColor: AppColors.debit),
+              child: const Text('Overwrite',
+                  style: TextStyle(color: Colors.white)),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+    }
+
+    setState(() => _isApplying = true);
+    try {
+      final updated =
+          await _db.applyRulesToExisting(overwriteExisting: overwrite);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(updated == 0
+              ? 'No transactions needed changing'
+              : '$updated transaction(s) re-categorised'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("Couldn't apply rules: $e"),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isApplying = false);
+    }
   }
 
   Widget _buildSearchBar() {

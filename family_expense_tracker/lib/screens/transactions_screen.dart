@@ -1221,17 +1221,38 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
       children: [
         Icon(icon, size: 20, color: AppColors.textSecondary),
         const SizedBox(width: 12),
-        Text(
-          label,
-          style: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
+        Flexible(
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style:
+                const TextStyle(color: AppColors.textSecondary, fontSize: 13),
+          ),
         ),
-        const Spacer(),
-        Text(
-          value,
-          style: const TextStyle(
-            color: AppColors.textPrimary,
-            fontWeight: FontWeight.bold,
-            fontSize: 14,
+        const SizedBox(width: 16),
+        // The value took its natural width with only a Spacer holding it off
+        // the label, so a long one — a six-figure bank balance, a full UPI
+        // reference — ran past the edge of the row and had its last character
+        // clipped. Scaling down inside the space that is left keeps every
+        // digit on screen; a balance missing its final digit is worse than a
+        // small one.
+        Expanded(
+          child: Align(
+            alignment: Alignment.centerRight,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerRight,
+              child: Text(
+                value,
+                maxLines: 1,
+                style: const TextStyle(
+                  color: AppColors.textPrimary,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 14,
+                ),
+              ),
+            ),
           ),
         ),
       ],

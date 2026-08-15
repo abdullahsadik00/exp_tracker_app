@@ -57,24 +57,60 @@ class CategorizationRule {
   }
 }
 
+/// What the rules alone say about a transaction, before any defaults are
+/// applied. Null fields mean "no rule had an opinion".
+class RuleMatch {
+  const RuleMatch({this.category, this.assignedTo, this.bankName});
+
+  final String? category;
+  final String? assignedTo;
+  final String? bankName;
+
+  bool get isEmpty =>
+      category == null && assignedTo == null && bankName == null;
+}
+
 class CategorizationService {
   final List<CategorizationRule> _rules;
 
   CategorizationService(this._rules);
 
-  Map<String, String> analyzeTransaction(String rawText, String type) {
+  /// Runs the rules and reports only what they actually matched.
+  ///
+  /// Kept separate from [analyzeTransaction] because that one fills in
+  /// 'Unassigned'/'SBI'/'Other' for anything unmatched, which is right when
+  /// creating a transaction and wrong when re-categorising one that already
+  /// exists — there, a default would overwrite a real value with a placeholder.
+  RuleMatch match(String rawText) {
     final text = rawText.toUpperCase();
     String? assignedTo;
     String? bankName;
     String? category;
 
     for (final rule in _rules) {
-      if (!text.contains(rule.keyword)) continue;
+      // Keywords are upper-cased on save, but rules restored from an older
+      // backup or seeded elsewhere may not be. Matching against a normalised
+      // copy means a lower-case keyword still works instead of silently
+      // never matching anything.
+      if (!text.contains(rule.keyword.toUpperCase())) continue;
       assignedTo ??= rule.assignedTo;
       bankName ??= rule.bankName;
       category ??= rule.category;
       if (assignedTo != null && bankName != null && category != null) break;
     }
+
+    return RuleMatch(
+      category: category,
+      assignedTo: assignedTo,
+      bankName: bankName,
+    );
+  }
+
+  Map<String, String> analyzeTransaction(String rawText, String type) {
+    final matched = match(rawText);
+    String? assignedTo = matched.assignedTo;
+    String? bankName = matched.bankName;
+    String? category = matched.category;
 
     assignedTo ??= 'Unassigned';
     bankName ??= 'SBI';

@@ -525,6 +525,69 @@ class LocalDbService {
     return maps.map((m) => CategorizationRule.fromMap(m)).toList();
   }
 
+  /// Re-runs the categorization rules over transactions already stored.
+  ///
+  /// Rules used to apply only at import time, so editing them changed nothing
+  /// the user could see — the transactions they were looking at had been
+  /// categorised once, on the way in, and never reconsidered.
+  ///
+  /// [overwriteExisting] false only fills gaps: a category still sitting at
+  /// 'Other' or a person still 'Unassigned'. True re-applies over whatever is
+  /// there, which also overwrites categories set by hand — the caller is
+  /// expected to have said so.
+  ///
+  /// `bankName` is never touched either way. The running ledger balance is
+  /// computed per bank, so moving a transaction to another bank would silently
+  /// skew two balances at once; which account the money left is a fact about
+  /// the transaction, not a preference a keyword should override.
+  Future<int> applyRulesToExisting({required bool overwriteExisting}) async {
+    final db = await database;
+    final categorizer = CategorizationService(await getCategorizationRules());
+
+    final rows = await db.query('transactions',
+        columns: ['id', 'rawSmsText', 'description', 'category', 'assignedTo']);
+
+    var updated = 0;
+    final batch = db.batch();
+
+    for (final row in rows) {
+      // Match against everything the transaction knows about itself: the
+      // original SMS where there is one, and the cleaned-up description, which
+      // is all a manually-added row has.
+      final haystack =
+          '${row['rawSmsText'] ?? ''} ${row['description'] ?? ''}';
+      final matched = categorizer.match(haystack);
+      if (matched.isEmpty) continue;
+
+      final currentCategory = (row['category'] as String?) ?? 'Other';
+      final currentAssignedTo = (row['assignedTo'] as String?) ?? 'Unassigned';
+
+      final changes = <String, Object?>{};
+      if (matched.category != null &&
+          matched.category != currentCategory &&
+          (overwriteExisting || currentCategory == 'Other')) {
+        changes['category'] = matched.category;
+      }
+      if (matched.assignedTo != null &&
+          matched.assignedTo != currentAssignedTo &&
+          (overwriteExisting || currentAssignedTo == 'Unassigned')) {
+        changes['assignedTo'] = matched.assignedTo;
+      }
+      if (changes.isEmpty) continue;
+
+      changes['updated_at'] = DateTime.now().toIso8601String();
+      batch.update('transactions', changes,
+          where: 'id = ?', whereArgs: [row['id']]);
+      updated++;
+    }
+
+    if (updated > 0) {
+      await batch.commit(noResult: true);
+      notifyChange();
+    }
+    return updated;
+  }
+
   Future<void> insertCategorizationRule(CategorizationRule rule) async {
     final db = await database;
     await db.insert('categorization_rules', rule.toMap()..remove('id'));
