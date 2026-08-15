@@ -124,6 +124,11 @@ class AnalyticsRepository {
         ? await _expenseTotal(db, prevYm, uptoDayOfMonth: daysElapsed)
         : await _expenseTotal(db, prevYm);
 
+    final income = await _incomeTotal(db, ym);
+    final previousIncome = isCurrent
+        ? await _incomeTotal(db, prevYm, uptoDayOfMonth: daysElapsed)
+        : await _incomeTotal(db, prevYm);
+
     final budgets = await _budgets(db);
     final totalBudget = budgets.values.fold(0, (int s, int v) => s + v);
 
@@ -162,6 +167,8 @@ class AnalyticsRepository {
       spentPaise: spent,
       previousComparablePaise: prevComparable,
       previousMonthName: monthNameOf(prevYm),
+      incomePaise: income,
+      previousIncomePaise: previousIncome,
       forecastPaise: forecast,
       totalBudgetPaise: totalBudget,
       unassignedPaise: people
@@ -266,6 +273,29 @@ class AnalyticsRepository {
     }
     final rows = await db.rawQuery(
       'SELECT $signedExpense AS p FROM transactions WHERE $where',
+      args,
+    );
+    final total = (rows.first['p'] as num?)?.toInt() ?? 0;
+    return total > 0 ? total : 0;
+  }
+
+  /// Money genuinely coming in: credits that are not transfers between our own
+  /// accounts, not failed, and not refunds of our own spending. A refund is
+  /// money coming back, not income — counting it as income would flatter the
+  /// savings rate every time something was returned.
+  Future<int> _incomeTotal(
+    Database db,
+    String ym, {
+    int? uptoDayOfMonth,
+  }) async {
+    final where = StringBuffer('date LIKE ? AND $incomeRows');
+    final args = <Object?>['$ym%'];
+    if (uptoDayOfMonth != null) {
+      where.write(" AND CAST(strftime('%d', date) AS INTEGER) <= ?");
+      args.add(uptoDayOfMonth);
+    }
+    final rows = await db.rawQuery(
+      'SELECT SUM($paise) AS p FROM transactions WHERE $where',
       args,
     );
     final total = (rows.first['p'] as num?)?.toInt() ?? 0;
@@ -447,6 +477,18 @@ class AnalyticsRepository {
         severity: AlertSeverity.critical,
         message: '${c.category} is ${_r(c.overBudgetPaise)} over budget$spike',
         category: c.category,
+      );
+    }
+
+    // Spending past what came in. Guarded on income being present at all:
+    // mid-month, before salary lands, every household is "over" its income and
+    // the warning would be noise rather than news.
+    if (s.incomePaise > 0 && s.spentPaise > s.incomePaise) {
+      return AnalyticsAlert(
+        severity: AlertSeverity.critical,
+        message: s.isCurrentMonth
+            ? 'Spending has passed income by ${_r(-s.netPaise)} this month'
+            : 'Spent ${_r(-s.netPaise)} more than came in',
       );
     }
 
@@ -644,6 +686,8 @@ class AnalyticsSnapshot {
     required this.spentPaise,
     required this.previousComparablePaise,
     required this.previousMonthName,
+    required this.incomePaise,
+    required this.previousIncomePaise,
     required this.forecastPaise,
     required this.totalBudgetPaise,
     required this.unassignedPaise,
@@ -662,6 +706,8 @@ class AnalyticsSnapshot {
   final int spentPaise;
   final int previousComparablePaise;
   final String previousMonthName;
+  final int incomePaise;
+  final int previousIncomePaise;
 
   /// Projected month-end spend for the current month; the final total for any
   /// past month. Same slot, period-appropriate content — a projection for a
@@ -685,6 +731,22 @@ class AnalyticsSnapshot {
 
   int get headroomPaise => totalBudgetPaise - spentPaise;
 
+  /// What was left after spending. Negative means the month ate into savings.
+  int get netPaise => incomePaise - spentPaise;
+
+  /// The share of income not spent. Null when there is no income to divide by —
+  /// a savings rate against zero income is not 0%, it is undefined, and
+  /// printing "0%" would be a number the user could act on wrongly.
+  double? get savingsRate =>
+      incomePaise > 0 ? netPaise / incomePaise : null;
+
+  int get incomeDeltaPaise => incomePaise - previousIncomePaise;
+
+  /// Whether this household tracks income at all. Someone who only records
+  /// spending should not be shown an empty income section every month, so the
+  /// whole block stays hidden until there is income in this month or the last.
+  bool get tracksIncome => incomePaise > 0 || previousIncomePaise > 0;
+
   double get budgetProgress =>
       totalBudgetPaise > 0 ? (spentPaise / totalBudgetPaise).clamp(0.0, 1.0) : 0;
 
@@ -699,6 +761,8 @@ class AnalyticsSnapshot {
         spentPaise: spentPaise,
         previousComparablePaise: previousComparablePaise,
         previousMonthName: previousMonthName,
+        incomePaise: incomePaise,
+        previousIncomePaise: previousIncomePaise,
         forecastPaise: forecastPaise,
         totalBudgetPaise: totalBudgetPaise,
         unassignedPaise: unassignedPaise,

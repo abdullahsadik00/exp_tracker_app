@@ -193,6 +193,14 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
           }
         },
       ),
+      // Money in sits above the categories: "are we spending more than we earn"
+      // outranks "which category is high" when both are on screen.
+      if (s.tracksIncome) ...[
+        const SizedBox(height: 32),
+        _sectionHeader('Money in'),
+        const SizedBox(height: 12),
+        _MoneyInCard(snapshot: s),
+      ],
       const SizedBox(height: 32),
       _sectionHeader('Where it went'),
       const SizedBox(height: 12),
@@ -678,6 +686,155 @@ class _ThisMonthCard extends StatelessWidget {
   }
 }
 
+/// Income, what was left, and the share of income kept.
+///
+/// The savings rate is the point of this card — income and net are the working
+/// shown underneath it. It appears only for households that record income at
+/// all, because a rate computed from a month of untagged credits would be
+/// confidently wrong, which is worse than absent.
+class _MoneyInCard extends StatelessWidget {
+  const _MoneyInCard({required this.snapshot});
+
+  final AnalyticsSnapshot snapshot;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = snapshot;
+    final rate = s.savingsRate;
+    final negative = s.netPaise < 0;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: negative
+              ? AppColors.debit.withOpacity(0.3)
+              : Colors.white.withOpacity(0.05),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Came in',
+                      style: TextStyle(
+                          color: AppColors.textSecondary, fontSize: 11)),
+                  const SizedBox(height: 4),
+                  Text(formatPaise(s.incomePaise),
+                      style: const TextStyle(
+                          color: AppColors.credit,
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold)),
+                ],
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: _DeltaLabel(
+                    deltaPaise: s.incomeDeltaPaise,
+                    hasBaseline: s.previousIncomePaise > 0,
+                    suffix: 'vs ${s.previousMonthName}',
+                    higherIsBetter: true,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+
+          // Income minus spending, drawn as the share of income each took. The
+          // bar is the fastest read on the card: how much of the green is left.
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: s.incomePaise > 0
+                  ? (s.spentPaise / s.incomePaise).clamp(0.0, 1.0)
+                  : 0.0,
+              backgroundColor: AppColors.credit.withOpacity(0.25),
+              color: negative ? AppColors.debit : AppColors.accent,
+              minHeight: 8,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: _MoneyStat(
+                  label: negative ? 'Overspent by' : 'Left over',
+                  value: formatPaise(s.netPaise.abs()),
+                  color: negative ? AppColors.debit : AppColors.credit,
+                ),
+              ),
+              Expanded(
+                child: _MoneyStat(
+                  label: 'Saved of income',
+                  value: rate == null
+                      ? '—'
+                      : '${(rate * 100).round()}%',
+                  color: rate == null
+                      ? AppColors.textSecondary
+                      : (rate < 0
+                          ? AppColors.debit
+                          : (rate < 0.10
+                              ? Colors.amber
+                              : AppColors.credit)),
+                ),
+              ),
+            ],
+          ),
+          if (s.isCurrentMonth) ...[
+            const SizedBox(height: 10),
+            Text(
+              'Month still in progress — income yet to arrive will move this.',
+              style: TextStyle(
+                  color: AppColors.textSecondary.withOpacity(0.8),
+                  fontSize: 11),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _MoneyStat extends StatelessWidget {
+  const _MoneyStat(
+      {required this.label, required this.value, required this.color});
+
+  final String label;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                  color: AppColors.textSecondary, fontSize: 11)),
+          const SizedBox(height: 2),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(value,
+                style: TextStyle(
+                    color: color, fontSize: 18, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      );
+}
+
 class _Kpi extends StatelessWidget {
   const _Kpi({
     required this.label,
@@ -728,11 +885,17 @@ class _DeltaLabel extends StatelessWidget {
     required this.deltaPaise,
     required this.hasBaseline,
     required this.suffix,
+    this.higherIsBetter = false,
   });
 
   final int deltaPaise;
   final bool hasBaseline;
   final String suffix;
+
+  /// Spending more is bad news; earning more is good news. Same arrow, opposite
+  /// colour, so the reader never has to work out which figure they are looking
+  /// at to know whether green is what they wanted.
+  final bool higherIsBetter;
 
   @override
   Widget build(BuildContext context) {
@@ -745,10 +908,11 @@ class _DeltaLabel extends StatelessWidget {
           style: const TextStyle(color: AppColors.textSecondary, fontSize: 12));
     }
     final up = deltaPaise > 0;
+    final good = higherIsBetter ? up : !up;
     return Text(
       '${up ? '↑' : '↓'} ${formatPaise(deltaPaise.abs())} $suffix',
       style: TextStyle(
-        color: up ? AppColors.debit : AppColors.credit,
+        color: good ? AppColors.credit : AppColors.debit,
         fontSize: 12,
         fontWeight: FontWeight.w600,
       ),
