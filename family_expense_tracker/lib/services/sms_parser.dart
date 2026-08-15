@@ -205,7 +205,7 @@ class SmsParser {
     final isFailed = _failure.hasMatch(body);
     final kind = _kind(body);
 
-    var type = _direction(body, primary.start);
+    var type = _abbreviatedDirection(body) ?? _direction(body, primary.start);
     var directionAssumed = false;
     if (type == null) {
       // Decline notices often state no verb at all ("your transaction of
@@ -359,6 +359,33 @@ class SmsParser {
 
   // ─── Direction ─────────────────────────────────────────────────────────────
 
+  /// Bank of Baroda's UPI alerts state direction as "Dr."/"Cr." rather than in
+  /// words:
+  ///
+  ///     Rs.1000.00 Dr. from A/C XXXXXX1617 and Cr. to payee@bank.
+  ///     Ref:100143760671. AvlBal:Rs427312.86(2026:08:05 12:10:57)
+  ///
+  /// Both abbreviations appear in every such message — one for our side, one
+  /// for the payee's — so the direction is whichever is attached to *our*
+  /// account. Anchoring on "A/C" is what makes that unambiguous.
+  ///
+  /// This runs ahead of the word-based search rather than adding "dr"/"cr" to
+  /// the verb lists, because those are matched as plain substrings: bare "dr"
+  /// would fire inside "hundred" and quietly turn a credit into a debit.
+  static final RegExp _drFromAccount =
+      RegExp(r'\bdr\.?\s+from\s+a\/?c\b', caseSensitive: false);
+  static final RegExp _crToAccount =
+      RegExp(r'\bcr\.?\s+to\s+a\/?c\b', caseSensitive: false);
+
+  String? _abbreviatedDirection(String body) {
+    final debit = _drFromAccount.hasMatch(body);
+    final credit = _crToAccount.hasMatch(body);
+    // Both, or neither, means this is not the format — fall through rather
+    // than guess.
+    if (debit == credit) return null;
+    return debit ? 'debit' : 'credit';
+  }
+
   /// Chooses credit vs debit by the verb *nearest the amount*.
   ///
   /// Many alerts legitimately contain both words — "Rs.500 debited from A/c
@@ -477,6 +504,14 @@ class SmsParser {
   // ─── Merchant ──────────────────────────────────────────────────────────────
 
   static final List<RegExp> _merchantPatterns = [
+    // UPI handles first. In a "Dr. from A/C … and Cr. to payee@bank" alert the
+    // counterparty is the side that is not our account, and an account number
+    // never looks like a VPA — so these two can be tried in either order
+    // without one stealing the other's match.
+    RegExp(r'\bcr\.?\s+to\s+([A-Za-z0-9][\w.\-]{1,}@[A-Za-z]{2,})',
+        caseSensitive: false),
+    RegExp(r'\bdr\.?\s+from\s+([A-Za-z0-9][\w.\-]{1,}@[A-Za-z]{2,})',
+        caseSensitive: false),
     RegExp(r'(?:trf|transfer)\s+to\s+(.+?)(?:\s+ref\s*no|\s+ref\b|\s+on\b|[.\n]|$)',
         caseSensitive: false),
     RegExp(r'transfer from\s+(.+?)(?:\s+ref\s*no|\s+ref\b|[.\n]|$)',
@@ -524,6 +559,12 @@ class SmsParser {
       r'(?<!\w)(\d{1,2})[-\s]?([A-Za-z]{3})[-\s]?(\d{2,4})(?!\d)',
       caseSensitive: false);
   static final RegExp _iso = RegExp(r'(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)');
+
+  /// BoB stamps its alerts "(2026:08:05 12:10:57)" — ISO order, colons for
+  /// separators. Without this the timestamp the bank itself stated is thrown
+  /// away in favour of when the handset happened to receive the message.
+  static final RegExp _isoColon =
+      RegExp(r'(?<!\d)(\d{4}):(\d{2}):(\d{2})(?!\d)');
   static final RegExp _time =
       RegExp(r'(?<!\d)(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(am|pm)?', caseSensitive: false);
 
@@ -536,7 +577,7 @@ class SmsParser {
   DateTime? _dateFromBody(String body, DateTime receivedAt) {
     int? y, mo, d;
 
-    final isoM = _iso.firstMatch(body);
+    final isoM = _iso.firstMatch(body) ?? _isoColon.firstMatch(body);
     final alphaM = _dmyAlpha.firstMatch(body);
     final numM = _dmyNumeric.firstMatch(body);
 

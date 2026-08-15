@@ -293,4 +293,109 @@ void main() {
       expect(r.merchant, isNull);
     });
   });
+
+  // Bank of Baroda's UPI alerts abbreviate the direction to "Dr."/"Cr." and
+  // name the counterparty by VPA. Every one of these was landing in the
+  // "looks financial but could not be read" pile.
+  group('BoB abbreviated Dr./Cr. UPI alerts', () {
+    test('outgoing UPI payment is a debit', () {
+      final r = parse(
+        'Rs.1000.00 Dr. from A/C XXXXXX1617 and Cr. to angelmfcpupa@indus. '
+        'Ref:100143760671. AvlBal:Rs427312.86(2026:08:05 12:10:57). '
+        'Not you? Call 18005700',
+        sender: 'JK-BOBSMS-S',
+        at: DateTime(2026, 8, 5, 12, 20),
+      );
+
+      expect(r.isTransaction, isTrue);
+      expect(r.type, 'debit');
+      expect(r.amountPaise, 100000);
+      expect(r.bank, 'BoB');
+      expect(r.accountTail, '1617');
+      expect(r.referenceId, '100143760671');
+      expect(r.merchant, 'angelmfcpupa@indus');
+      expect(r.status, TxnStatus.posted);
+      expect(r.needsReview, isFalse);
+    });
+
+    test('the available balance is not mistaken for the amount', () {
+      final r = parse(
+        'Rs.42900.00 Dr. from A/C XXXXXX1617 and Cr. to qr.taqwapunek@sib. '
+        'Ref:615270678753. AvlBal:Rs190917.86(2026:06:01 02:26:34).',
+        sender: 'JK-BOBSMS-S',
+        at: DateTime(2026, 6, 1, 3),
+      );
+
+      expect(r.amountPaise, 4290000);
+      expect(r.balancePaise, 19091786);
+    });
+
+    test('the bank-stated timestamp wins over delivery time', () {
+      final r = parse(
+        'Rs.500.00 Dr. from A/C XXXXXX1617 and Cr. to angelmfcpupa@indus. '
+        'Ref:100085327370. AvlBal:Rs22686.86(2026:05:04 12:13:32).',
+        sender: 'JK-BOBSMS-S',
+        // Delivered a day late, as backlogged SMS often are.
+        at: DateTime(2026, 5, 5, 9),
+      );
+
+      expect(r.dateFromBody, isTrue);
+      expect(r.dateTime, DateTime(2026, 5, 4, 12, 13, 32));
+    });
+
+    test('incoming money in the same format is a credit', () {
+      final r = parse(
+        'Rs.2500.00 Cr. to A/C XXXXXX1617 and Dr. from sheikhferoz36@okicici. '
+        'Ref:654509036621. AvlBal:Rs245367.86(2026:06:28 11:36:43).',
+        sender: 'JK-BOBSMS-S',
+        at: DateTime(2026, 6, 28, 12),
+      );
+
+      expect(r.type, 'credit');
+      expect(r.merchant, 'sheikhferoz36@okicici');
+    });
+
+    test('a "dr" buried in an ordinary word does not flip the direction', () {
+      // "HUNDRED" contains "dr" — the reason Dr./Cr. is matched with a word
+      // boundary and anchored on "A/C", rather than appended to the verb list,
+      // which is searched as plain substrings.
+      final r = parse(
+        'Rs.500.00 credited to A/c XX1617 from FIVE HUNDRED TRADERS '
+        'Ref 998877',
+      );
+      expect(r.type, 'credit');
+    });
+  });
+
+  group('messages that must stay out', () {
+    test('EPF passbook interest is not a bank transaction', () {
+      final r = parse(
+        'PF interest of 6584 for 2025-26 credited to your UAN 101760251009 '
+        '(PUPUN26331460000010071) The CB on 31MAR2026 is 101672 - EPFO',
+        sender: 'BH-EPFOHO-G',
+      );
+      // Money in a retirement account, not in a bank account we track.
+      expect(r.isTransaction, isFalse);
+    });
+
+    test('a UPI linking notice is not a transaction', () {
+      final r = parse(
+        'We got a request for linking your account for UPI 1617. If its not '
+        'you kindly contact your bank on helpline no 1800-5700 immediately-BOB',
+        sender: 'JK-BOBSMS-S',
+      );
+      expect(r.isTransaction, isFalse);
+    });
+
+    test('a biller receipt is not imported alongside the bank debit', () {
+      // The bank sends its own alert for the same payment; importing both
+      // would count the money twice.
+      final r = parse(
+        'Thanks for Online payment of Rs 1610.00 dated 18-Feb-26 by UPI '
+        'towards MSEDCL Energy Bill for consumer no. 160250374159',
+        sender: 'JD-MSEDCL-S',
+      );
+      expect(r.isTransaction, isFalse);
+    });
+  });
 }
