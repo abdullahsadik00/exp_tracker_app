@@ -28,6 +28,13 @@ class _SmsSyncScreenState extends State<SmsSyncScreen> {
 
   final NativeSmsQueue _queue = NativeSmsQueue();
 
+  // Read once rather than in build(): this screen calls setState on every
+  // import-progress tick, which would otherwise restart both queries.
+  late final Stream<List<ReconciliationResult>> _reconciliationStream =
+      _db.reconciliationStream;
+  late final Stream<List<TransactionModel>> _needsReviewStream =
+      _db.needsReviewStream;
+
   bool _syncing = false;
   ImportProgress? _progress;
   ImportReport? _report;
@@ -309,7 +316,7 @@ class _SmsSyncScreenState extends State<SmsSyncScreen> {
 
   Widget _reconciliationSection() {
     return StreamBuilder<List<ReconciliationResult>>(
-      stream: _db.reconciliationStream,
+      stream: _reconciliationStream,
       builder: (context, snapshot) {
         final results = snapshot.data;
         if (results == null) {
@@ -467,7 +474,7 @@ class _SmsSyncScreenState extends State<SmsSyncScreen> {
 
   Widget _reviewSection() {
     return StreamBuilder<List<TransactionModel>>(
-      stream: _db.needsReviewStream,
+      stream: _needsReviewStream,
       builder: (context, snapshot) {
         final items = snapshot.data;
         if (items == null) return _card(child: const _Loading());

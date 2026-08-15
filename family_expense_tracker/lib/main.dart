@@ -46,11 +46,17 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       TransactionImportService(nativeQueue: _smsQueue);
   StreamSubscription<int>? _captureSubscription;
 
-  final List<Widget> _screens = const [
-    DashboardScreen(),
-    TransactionsScreen(),
-    AddTransactionScreen(),
-    AnalyticsScreen(),
+  /// Amounts start hidden on every launch, the way a banking app does, and the
+  /// reveal lasts only for this session. It lives here rather than in the
+  /// dashboard's own state because switching tabs rebuilds that state — the
+  /// reveal has to survive a trip to Analytics and back, but not a relaunch.
+  final ValueNotifier<bool> _amountsHidden = ValueNotifier<bool>(true);
+
+  late final List<Widget> _screens = [
+    DashboardScreen(amountsHidden: _amountsHidden),
+    const TransactionsScreen(),
+    const AddTransactionScreen(),
+    const AnalyticsScreen(),
   ];
 
   @override
@@ -70,6 +76,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   void dispose() {
     _captureSubscription?.cancel();
     _smsQueue.dispose();
+    _amountsHidden.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }

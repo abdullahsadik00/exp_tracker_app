@@ -662,4 +662,164 @@ void main() {
       expect(restored!.imported, 1);
     });
   });
+
+  // ── Dashboard balance ───────────────────────────────────────────────────────
+
+  group('dashboard balance', () {
+    /// Dated now, because the per-person and per-bank flow figures are scoped
+    /// to the current month.
+    Future<void> addTxn({
+      required String bank,
+      required String assignedTo,
+      required String type,
+      required String rupees,
+      String id = '',
+    }) async {
+      await db.insertTransaction(TransactionModel(
+        id: id.isEmpty ? '$bank-$assignedTo-$type-$rupees' : id,
+        amountPaise: Money.parsePaise(rupees)!,
+        type: type,
+        bankName: bank,
+        assignedTo: assignedTo,
+        category: 'Other',
+        description: 'test',
+        date: DateTime.now(),
+        rawSmsText: '',
+      ));
+    }
+
+    test('own-accounts balance is SBI plus BoB, including opening balances',
+        () async {
+      await db.setOpeningBalance('SBI', Money.parsePaise('10000')!);
+      await db.setOpeningBalance('BoB', Money.parsePaise('5000')!);
+      await addTxn(bank: 'SBI', assignedTo: 'Me', type: 'debit', rupees: '500');
+      await addTxn(bank: 'BoB', assignedTo: 'Me', type: 'credit', rupees: '2000');
+
+      // (10000 - 500) + (5000 + 2000)
+      expect(await db.ownAccountsBalancePaise(), Money.parsePaise('16500'));
+    });
+
+    test('own-accounts balance ignores banks that are not ours', () async {
+      await addTxn(bank: 'SBI', assignedTo: 'Me', type: 'credit', rupees: '1000');
+      await addTxn(bank: 'Cash', assignedTo: 'Me', type: 'credit', rupees: '9999');
+
+      expect(await db.ownAccountsBalancePaise(), Money.parsePaise('1000'));
+      // currentBalancePaise still counts every bank — the two are deliberately
+      // different questions.
+      expect(await db.currentBalancePaise(), Money.parsePaise('10999'));
+    });
+
+    test('the total is exactly the two account cards, never Mom or Dad on top',
+        () async {
+      // Mom spends out of SBI. The money leaves SBI once, so it must move the
+      // total once — not once for SBI and again for Mom.
+      await addTxn(bank: 'SBI', assignedTo: 'Me', type: 'credit', rupees: '5000');
+      await addTxn(bank: 'SBI', assignedTo: 'Mom', type: 'debit', rupees: '500');
+      await addTxn(bank: 'BoB', assignedTo: 'Dad', type: 'debit', rupees: '300');
+
+      final stats = await db.getDashboardStatsOptimized();
+
+      expect(stats['sbi_balance'], 4500.0); // 5000 - 500
+      expect(stats['bob_balance'], -300.0);
+      expect(stats['balance'], stats['sbi_balance']! + stats['bob_balance']!);
+      expect(stats['balance'], 4200.0);
+
+      // The person figures are flows, reported separately and never added in.
+      expect(stats['mom_flow'], -500.0);
+      expect(stats['dad_flow'], -300.0);
+    });
+  });
+
+  // ── Query streams ───────────────────────────────────────────────────────────
+
+  group('query streams', () {
+    Future<void> waitFor(bool Function() done, String reason) async {
+      final deadline = DateTime.now().add(const Duration(seconds: 5));
+      while (!done() && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(done(), isTrue, reason: reason);
+    }
+
+    test('the same stream object can be listened to more than once', () async {
+      // The regression this guards: holding one stream in a field and handing
+      // it to two widgets used to throw "Stream has already been listened to".
+      final stream = db.dashboardStatsStream;
+
+      final first = <Map<String, double>>[];
+      final second = <Map<String, double>>[];
+
+      final subA = stream.listen(first.add);
+      final subB = stream.listen(second.add);
+
+      await waitFor(() => first.isNotEmpty && second.isNotEmpty,
+          'both listeners should receive the initial value');
+
+      await subA.cancel();
+      await subB.cancel();
+    });
+
+    test('one change notification emits once to every listener', () async {
+      final first = <Map<String, double>>[];
+      final second = <Map<String, double>>[];
+
+      final subA = db.dashboardStatsStream.listen(first.add);
+      final subB = db.dashboardStatsStream.listen(second.add);
+      await waitFor(() => first.isNotEmpty && second.isNotEmpty, 'seeded');
+
+      db.notifyChange();
+      await waitFor(() => first.length == 2 && second.length == 2,
+          'both listeners should see the change exactly once');
+
+      // Not three, not four: the query is shared, so a change re-reads the
+      // database once no matter how many widgets are watching.
+      expect(first, hasLength(2));
+      expect(second, hasLength(2));
+
+      await subA.cancel();
+      await subB.cancel();
+    });
+
+    test('a listener attaching later is seeded immediately', () async {
+      final first = <Map<String, double>>[];
+      final subA = db.dashboardStatsStream.listen(first.add);
+      await waitFor(() => first.isNotEmpty, 'first listener seeded');
+
+      final second = <Map<String, double>>[];
+      final subB = db.dashboardStatsStream.listen(second.add);
+      await waitFor(() => second.isNotEmpty,
+          'a later listener should get the cached value without a change event');
+
+      await subA.cancel();
+      await subB.cancel();
+    });
+
+    test('re-reads after every listener has gone away', () async {
+      final before = <Map<String, double>>[];
+      final subA = db.dashboardStatsStream.listen(before.add);
+      await waitFor(() => before.isNotEmpty, 'seeded');
+      await subA.cancel();
+
+      // Nothing is watching, so no change notification is being tracked. The
+      // next subscriber must re-read rather than replay a stale figure.
+      await db.insertTransaction(TransactionModel(
+        id: 'late-arrival',
+        amountPaise: Money.parsePaise('1000')!,
+        type: 'credit',
+        bankName: 'SBI',
+        assignedTo: 'Me',
+        category: 'Other',
+        description: 'test',
+        date: DateTime.now(),
+        rawSmsText: '',
+      ));
+
+      final after = <Map<String, double>>[];
+      final subB = db.dashboardStatsStream.listen(after.add);
+      await waitFor(() => after.isNotEmpty, 'reseeded');
+
+      expect(after.first['balance'], 1000.0);
+      await subB.cancel();
+    });
+  });
 }

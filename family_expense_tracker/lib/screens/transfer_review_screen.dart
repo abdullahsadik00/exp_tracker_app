@@ -3,12 +3,24 @@ import '../services/local_db_service.dart';
 import '../theme/app_colors.dart';
 import 'package:intl/intl.dart';
 
-class TransferReviewScreen extends StatelessWidget {
+class TransferReviewScreen extends StatefulWidget {
   const TransferReviewScreen({super.key});
 
   @override
+  State<TransferReviewScreen> createState() => _TransferReviewScreenState();
+}
+
+class _TransferReviewScreenState extends State<TransferReviewScreen> {
+  final LocalDbService db = LocalDbService.instance;
+
+  // Held rather than created in build(): confirming or dismissing a pair
+  // notifies the service, and re-minting the stream here would restart the
+  // query instead of letting the existing one emit.
+  late final Stream<List<Map<String, dynamic>>> _pairsStream =
+      db.potentialTransferPairsStream;
+
+  @override
   Widget build(BuildContext context) {
-    final db = LocalDbService.instance;
     final currencyFormat = NumberFormat.currency(symbol: '₹', decimalDigits: 0);
     final dateFormat = DateFormat('dd MMM, hh:mm a');
 
@@ -22,7 +34,7 @@ class TransferReviewScreen extends StatelessWidget {
         iconTheme: const IconThemeData(color: AppColors.textPrimary),
       ),
       body: StreamBuilder<List<Map<String, dynamic>>>(
-        stream: db.potentialTransferPairsStream,
+        stream: _pairsStream,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting && !snapshot.hasData) {
             return const Center(child: CircularProgressIndicator(color: AppColors.accent));

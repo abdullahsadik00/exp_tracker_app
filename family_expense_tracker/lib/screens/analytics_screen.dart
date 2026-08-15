@@ -18,6 +18,19 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
   int touchedIndex = -1;
   late String _selectedMonth;
 
+  // Read once, not on every build — a StreamBuilder handed a freshly minted
+  // stream re-subscribes and re-queries on every rebuild.
+  late final Stream<List<String>> _monthsStream =
+      _localDbService.availableMonthsStream;
+  late final Stream<Map<String, double>> _yearlyTrendStream =
+      _localDbService.yearlySpendingTrendStream;
+  late final Stream<Map<String, dynamic>> _forecastStream =
+      _localDbService.forecastStream;
+  late final Stream<List<Map<String, dynamic>>> _anomaliesStream =
+      _localDbService.anomaliesStream;
+  late final Stream<List<Map<String, dynamic>>> _budgetProgressStream =
+      _localDbService.budgetProgressStream;
+
   @override
   void initState() {
     super.initState();
@@ -35,7 +48,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
         elevation: 0,
       ),
       body: StreamBuilder<List<String>>(
-        stream: _localDbService.availableMonthsStream,
+        stream: _monthsStream,
         builder: (context, monthSnapshot) {
           if (monthSnapshot.connectionState == ConnectionState.waiting && !monthSnapshot.hasData) {
             return const Center(child: CircularProgressIndicator(color: AppColors.accent));
@@ -83,8 +96,16 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
                       const SizedBox(height: 24),
                       _buildLegendSection(debitTotals),
                     ],
+                    // Deliberately outside the "no spending" branch above: a
+                    // forecast and a budget matter most in a month that has
+                    // not been spent in yet.
+                    const SizedBox(height: 32),
+                    _buildSmartInsightsSection(),
+                    const SizedBox(height: 32),
+                    _buildSectionHeader('Monthly Budgets'),
+                    const SizedBox(height: 16),
+                    _buildBudgetSection(),
                     const SizedBox(height: 48),
-                    const SizedBox(height: 24),
                   ],
                 ),
               );
@@ -366,7 +387,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
 
   Widget _buildYearlyTrendSection() {
     return StreamBuilder<Map<String, double>>(
-      stream: _localDbService.yearlySpendingTrendStream,
+      stream: _yearlyTrendStream,
       builder: (context, snapshot) {
         if (!snapshot.hasData) return const SizedBox(
           height: 200,
@@ -450,6 +471,451 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
           ),
         );
       }
+    );
+  }
+
+  // ── Smart Insights ──────────────────────────────────────────────────────────
+  // Moved here from the dashboard, which had grown into a second analytics
+  // screen. Unchanged in behaviour — same streams, same queries.
+
+  Widget _buildSectionHeader(String title) {
+    return Row(
+      children: [
+        Text(title,
+          style: const TextStyle(
+            color: AppColors.textPrimary,
+            fontSize: 18,
+            fontWeight: FontWeight.bold
+          )),
+      ],
+    );
+  }
+
+  Widget _buildSmartInsightsSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildSectionHeader('Smart Insights'),
+        const SizedBox(height: 16),
+        _buildForecastCard(),
+        const SizedBox(height: 12),
+        _buildAnomaliesCard(),
+      ],
+    );
+  }
+
+  Widget _buildForecastCard() {
+    return StreamBuilder<Map<String, dynamic>>(
+      stream: _forecastStream,
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) return const SizedBox.shrink();
+        final data = snapshot.data!;
+        final current = data['currentSpend'] as double;
+        final forecast = data['forecastedSpend'] as double;
+        final daysElapsed = data['daysElapsed'] as int;
+        final totalDays = data['totalDays'] as int;
+        final totalBudget = data['totalBudget'] as double;
+        final currencyFormat = NumberFormat.currency(symbol: '₹', decimalDigits: 0);
+
+        if (forecast == 0) return const SizedBox.shrink();
+
+        final hasBudget = totalBudget > 0;
+        final isOver = hasBudget && forecast > totalBudget;
+        final progress = hasBudget ? (forecast / totalBudget).clamp(0.0, 1.0) : null;
+        final accentColor = isOver ? AppColors.debit : AppColors.accent;
+
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: accentColor.withOpacity(0.25)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(isOver ? Icons.trending_up_rounded : Icons.insights_rounded,
+                      color: accentColor, size: 20),
+                  const SizedBox(width: 10),
+                  Text('Month-End Forecast',
+                      style: TextStyle(
+                          color: accentColor, fontWeight: FontWeight.bold, fontSize: 14)),
+                  const Spacer(),
+                  Text('Day $daysElapsed / $totalDays',
+                      style: const TextStyle(color: AppColors.textSecondary, fontSize: 11)),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(currencyFormat.format(forecast),
+                      style: TextStyle(
+                          color: accentColor,
+                          fontSize: 28,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: -1)),
+                  const SizedBox(width: 8),
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 4),
+                    child: Text('projected',
+                        style: TextStyle(
+                            color: AppColors.textSecondary, fontSize: 12)),
+                  ),
+                  if (hasBudget) ...[
+                    const Spacer(),
+                    Text(
+                      '/ ${currencyFormat.format(totalBudget)} budget',
+                      style: TextStyle(
+                          color: isOver ? AppColors.debit : AppColors.textSecondary,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600),
+                    ),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '${currencyFormat.format(current)} spent so far',
+                style: const TextStyle(color: AppColors.textSecondary, fontSize: 12),
+              ),
+              if (progress != null) ...[
+                const SizedBox(height: 12),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: progress,
+                    backgroundColor: Colors.white.withOpacity(0.05),
+                    color: accentColor,
+                    minHeight: 5,
+                  ),
+                ),
+                if (isOver)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text(
+                      '⚠ Projected to exceed budget by ${currencyFormat.format(forecast - totalBudget)}',
+                      style: const TextStyle(color: AppColors.debit, fontSize: 11),
+                    ),
+                  ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildAnomaliesCard() {
+    return StreamBuilder<List<Map<String, dynamic>>>(
+      stream: _anomaliesStream,
+      builder: (context, snapshot) {
+        final anomalies = snapshot.data ?? [];
+        if (anomalies.isEmpty) return const SizedBox.shrink();
+
+        final currencyFormat = NumberFormat.currency(symbol: '₹', decimalDigits: 0);
+
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.amber.withOpacity(0.25)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.warning_amber_rounded, color: Colors.amber, size: 20),
+                  const SizedBox(width: 10),
+                  const Text('Spending Spikes',
+                      style: TextStyle(
+                          color: Colors.amber,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14)),
+                  const Spacer(),
+                  Text('vs 3-month avg',
+                      style: TextStyle(
+                          color: AppColors.textSecondary.withOpacity(0.6), fontSize: 11)),
+                ],
+              ),
+              const SizedBox(height: 16),
+              ...anomalies.take(3).map((a) {
+                final cat = a['category'] as String;
+                final current = a['currentAmount'] as double;
+                final avg = a['avgAmount'] as double;
+                final ratio = a['ratio'] as double;
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(cat,
+                                style: const TextStyle(
+                                    color: AppColors.textPrimary,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 14)),
+                            const SizedBox(height: 2),
+                            Text(
+                              '${currencyFormat.format(current)} this month  •  avg ${currencyFormat.format(avg)}',
+                              style: const TextStyle(
+                                  color: AppColors.textSecondary, fontSize: 11),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: AppColors.debit.withOpacity(0.12),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          '↑ ${ratio.toStringAsFixed(1)}×',
+                          style: const TextStyle(
+                              color: AppColors.debit,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 13),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  // ── Budgets ─────────────────────────────────────────────────────────────────
+
+  Widget _buildBudgetSection() {
+    return StreamBuilder<List<Map<String, dynamic>>>(
+      stream: _budgetProgressStream,
+      builder: (context, snapshot) {
+        if (!snapshot.hasData || (snapshot.data?.isEmpty ?? true)) {
+          return Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.info_outline, color: AppColors.textSecondary, size: 20),
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Text('No budgets set. Click here to start budgeting!',
+                    style: TextStyle(color: AppColors.textSecondary, fontSize: 13)),
+                ),
+                TextButton(
+                  onPressed: () => _showSetBudgetDialog(context),
+                  child: const Text('Add', style: TextStyle(color: AppColors.accent)),
+                )
+              ],
+            ),
+          );
+        }
+
+        final budgets = snapshot.data!;
+        return SizedBox(
+          height: 110,
+          child: ListView.builder(
+            scrollDirection: Axis.horizontal,
+            physics: const BouncingScrollPhysics(),
+            itemCount: budgets.length + 1,
+            itemBuilder: (context, index) {
+              if (index == budgets.length) {
+                return _buildAddBudgetCard();
+              }
+              final budget = budgets[index];
+              return _buildBudgetCard(budget);
+            },
+          ),
+        );
+      }
+    );
+  }
+
+  Widget _buildBudgetCard(Map<String, dynamic> budget) {
+    final spent = budget['spent'] as double;
+    final limit = budget['limit'] as double;
+    final category = budget['category'] as String;
+    final percent = (spent / limit).clamp(0.0, 1.0);
+    final isOver = spent > limit;
+
+    return Container(
+      width: 180,
+      margin: const EdgeInsets.only(right: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: isOver ? Colors.red.withOpacity(0.3) : Colors.white.withOpacity(0.05)),
+      ),
+      child: InkWell(
+        onTap: () => _showSetBudgetDialog(context, category: category, currentAmount: limit),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Text(category,
+                    maxLines: 1, overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.bold, fontSize: 13)),
+                ),
+                Text('${(percent * 100).toStringAsFixed(0)}%',
+                  style: TextStyle(color: isOver ? Colors.red : AppColors.textSecondary, fontSize: 10, fontWeight: FontWeight.bold)),
+              ],
+            ),
+            const Spacer(),
+            Row(
+              children: [
+                Text('₹${spent.toStringAsFixed(0)}', style: const TextStyle(color: AppColors.textPrimary, fontSize: 14, fontWeight: FontWeight.bold)),
+                Text(' / ₹${limit.toStringAsFixed(0)}', style: const TextStyle(color: AppColors.textSecondary, fontSize: 10)),
+              ],
+            ),
+            const SizedBox(height: 8),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: percent,
+                backgroundColor: Colors.white.withOpacity(0.05),
+                color: isOver ? Colors.red : AppColors.accent,
+                minHeight: 4,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAddBudgetCard() {
+    return Container(
+      width: 60,
+      margin: const EdgeInsets.only(right: 16),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withOpacity(0.05), style: BorderStyle.solid),
+      ),
+      child: IconButton(
+        onPressed: () => _showSetBudgetDialog(context),
+        icon: const Icon(Icons.add, color: AppColors.textSecondary),
+      ),
+    );
+  }
+
+  void _showSetBudgetDialog(BuildContext context, {String? category, double? currentAmount}) {
+    final amountController = TextEditingController(text: currentAmount?.toStringAsFixed(0) ?? '');
+    String selectedCategory = category ?? TransactionModel.availableCategories.first;
+    String? suggestionText;
+    bool loadingStarted = false;
+
+    Future<void> loadSuggestion(String cat, Function setDialogState) async {
+      final avg = await _localDbService.getCategoryAverage(cat);
+      if (avg > 0) {
+        setDialogState(() {
+          suggestionText = '3-month avg: ₹${avg.toStringAsFixed(0)}';
+          if (amountController.text.isEmpty) {
+            amountController.text = avg.toStringAsFixed(0);
+          }
+        });
+      }
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          if (category == null && suggestionText == null && !loadingStarted) {
+            loadingStarted = true;
+            loadSuggestion(selectedCategory, setDialogState);
+          }
+          return AlertDialog(
+            backgroundColor: AppColors.surface,
+            title: Text(category == null ? 'Set New Budget' : 'Update $category Budget',
+              style: const TextStyle(color: AppColors.textPrimary)),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (category == null)
+                  DropdownButtonFormField<String>(
+                    value: selectedCategory,
+                    dropdownColor: AppColors.surface,
+                    style: const TextStyle(color: AppColors.textPrimary),
+                    decoration: const InputDecoration(
+                      labelText: 'Category',
+                      labelStyle: TextStyle(color: AppColors.textSecondary)),
+                    items: TransactionModel.availableCategories
+                        .map((c) => DropdownMenuItem(value: c, child: Text(c)))
+                        .toList(),
+                    onChanged: (val) {
+                      selectedCategory = val!;
+                      amountController.clear();
+                      loadingStarted = false;
+                      setDialogState(() => suggestionText = null);
+                      loadSuggestion(val, setDialogState);
+                    },
+                  ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: amountController,
+                  keyboardType: TextInputType.number,
+                  autofocus: category != null,
+                  style: const TextStyle(color: AppColors.textPrimary),
+                  decoration: InputDecoration(
+                    labelText: 'Monthly Limit (₹)',
+                    labelStyle: const TextStyle(color: AppColors.textSecondary),
+                    helperText: suggestionText,
+                    helperStyle: const TextStyle(color: AppColors.accent, fontSize: 11),
+                    enabledBorder: const UnderlineInputBorder(
+                        borderSide: BorderSide(color: AppColors.accent)),
+                    focusedBorder: const UnderlineInputBorder(
+                        borderSide: BorderSide(color: AppColors.accent, width: 2)),
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              if (category != null)
+                TextButton(
+                  onPressed: () async {
+                    await _localDbService.deleteBudget(category);
+                    if (mounted) Navigator.pop(ctx);
+                  },
+                  child: const Text('Delete', style: TextStyle(color: Colors.red)),
+                ),
+              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+              ElevatedButton(
+                onPressed: () async {
+                  final amount = double.tryParse(amountController.text);
+                  if (amount != null && amount > 0) {
+                    await _localDbService.saveBudget(selectedCategory, amount);
+                    if (mounted) Navigator.pop(ctx);
+                  }
+                },
+                style: ElevatedButton.styleFrom(backgroundColor: AppColors.accent),
+                child: const Text('Save', style: TextStyle(color: Colors.white)),
+              ),
+            ],
+          );
+        },
+      ),
     );
   }
 }

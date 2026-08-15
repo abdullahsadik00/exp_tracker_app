@@ -53,6 +53,10 @@ class LocalDbService {
   /// Closes and forgets the open database. Test-only: the service is a
   /// singleton with static state, so each test needs a clean slate.
   Future<void> resetForTesting() async {
+    for (final query in _queries.values) {
+      await query.dispose();
+    }
+    _queries.clear();
     await _database?.close();
     _database = null;
     _opening = null;
@@ -842,13 +846,21 @@ class LocalDbService {
       'me_bob_income': 0.0,
       'mom_flow': 0.0,
       'dad_flow': 0.0,
+      'sbi_balance': 0.0,
+      'bob_balance': 0.0,
       'balance': 0.0,
     };
 
-    // 1. All-time balance, summed in integer paise and seeded with the
-    //    per-account opening balances. This is the single derivation of the
-    //    number the dashboard shows; nothing else may write to it.
-    stats['balance'] = Money.toDouble(await currentBalancePaise());
+    // 1. All-time balance per account, summed in integer paise and seeded with
+    //    the per-account opening balances. The headline total is derived from
+    //    these two and nothing else, so it cannot drift from the cards under
+    //    it — and Mom's and Dad's spending, which comes out of these same two
+    //    accounts, is never added on top.
+    final byBank = await balanceByBankPaise();
+    stats['sbi_balance'] = Money.toDouble(byBank['SBI'] ?? 0);
+    stats['bob_balance'] = Money.toDouble(byBank['BoB'] ?? 0);
+    stats['balance'] = ownAccounts.fold(
+        0.0, (sum, bank) => sum + Money.toDouble(byBank[bank] ?? 0));
 
     // 2. Current Month Totals (exclude confirmed transfers and failed txns)
     final monthTotals = await db.rawQuery('''
@@ -1251,7 +1263,7 @@ class LocalDbService {
   }
 
   Stream<List<Map<String, dynamic>>> get potentialTransferPairsStream =>
-      _streamOf(getPotentialTransferPairs);
+      _streamOf('potentialTransferPairs', getPotentialTransferPairs);
 
   /// Finds descriptions that appear as debits in 3+ distinct months over the last 6 months.
   Future<List<Map<String, dynamic>>> getRecurringPatterns() async {
@@ -1373,49 +1385,54 @@ class LocalDbService {
 
   void notifyChange() => _changeController.add(null);
 
-  Stream<List<TransactionModel>> getAllTransactionsStream() async* {
-    yield await getAllTransactions();
-    await for (final _ in onChange) {
-      yield await getAllTransactions();
-    }
-  }
+  /// One [_SharedQuery] per query, so a query is owned by the service rather
+  /// than by whichever widget happened to ask for it first.
+  final Map<String, dynamic> _queries = {};
 
-  Stream<T> _streamOf<T>(Future<T> Function() fetch) async* {
-    yield await fetch();
-    await for (final _ in onChange) {
-      yield await fetch();
-    }
-  }
+  /// The stream for [key], creating it on first use.
+  ///
+  /// The stream is multi-subscription, so handing the same query to two widgets
+  /// — or hoisting it into a `State` field and listening again after a rebuild —
+  /// can never re-listen to one subscription. What the callers share is the
+  /// single underlying fetch and its last result: one change notification means
+  /// one database read, however many widgets are watching.
+  Stream<T> _streamOf<T>(String key, Future<T> Function() fetch) =>
+      (_queries.putIfAbsent(key, () => _SharedQuery<T>(fetch, onChange))
+              as _SharedQuery<T>)
+          .stream;
+
+  Stream<List<TransactionModel>> getAllTransactionsStream() =>
+      _streamOf('allTransactions', getAllTransactions);
 
   Stream<Map<String, double>> get dashboardStatsStream =>
-      _streamOf(getDashboardStatsOptimized);
+      _streamOf('dashboardStats', getDashboardStatsOptimized);
 
   Stream<List<TransactionModel>> get unassignedTransactionsStream =>
-      _streamOf(getUnassignedTransactions);
+      _streamOf('unassignedTransactions', getUnassignedTransactions);
 
   Stream<List<TransactionModel>> get recentTransactionsStream =>
-      _streamOf(() => getRecentTransactions(limit: 3));
+      _streamOf('recentTransactions', () => getRecentTransactions(limit: 3));
 
   Stream<List<Map<String, dynamic>>> get budgetProgressStream =>
-      _streamOf(getBudgetProgress);
+      _streamOf('budgetProgress', getBudgetProgress);
 
   Stream<List<String>> get availableMonthsStream =>
-      _streamOf(getAvailableMonths);
+      _streamOf('availableMonths', getAvailableMonths);
 
   Stream<Map<String, double>> get yearlySpendingTrendStream =>
-      _streamOf(getYearlySpendingTrend);
+      _streamOf('yearlySpendingTrend', getYearlySpendingTrend);
 
   Stream<List<CategorizationRule>> get categorizationRulesStream =>
-      _streamOf(getCategorizationRules);
+      _streamOf('categorizationRules', getCategorizationRules);
 
   Stream<List<Map<String, dynamic>>> get anomaliesStream =>
-      _streamOf(getSpendingAnomalies);
+      _streamOf('anomalies', getSpendingAnomalies);
 
   Stream<Map<String, dynamic>> get forecastStream =>
-      _streamOf(getMonthEndForecast);
+      _streamOf('forecast', getMonthEndForecast);
 
   Stream<List<Map<String, dynamic>>> get recurringPatternsStream =>
-      _streamOf(getRecurringPatterns);
+      _streamOf('recurringPatterns', getRecurringPatterns);
   
   // Bulk Update Bank
   Future<void> bulkUpdateBank(Set<String> txIds, String newBank) async {
@@ -1590,6 +1607,21 @@ class LocalDbService {
     ''');
     final movement = (r.first['total'] as num?)?.toInt() ?? 0;
     return await totalOpeningBalancePaise() + movement;
+  }
+
+  /// The only two accounts that actually hold money. Me, Mom and Dad are people
+  /// transacting *within* these accounts, not accounts of their own.
+  static const List<String> ownAccounts = ['SBI', 'BoB'];
+
+  /// The headline balance: what the two real accounts hold, all-time.
+  ///
+  /// Deliberately not the same as [currentBalancePaise], which sums every bank
+  /// the ledger has ever seen. Mom's and Dad's spending already leaves one of
+  /// these two accounts, so adding a per-person figure on top would count the
+  /// same rupees twice.
+  Future<int> ownAccountsBalancePaise() async {
+    final byBank = await balanceByBankPaise();
+    return ownAccounts.fold(0, (sum, bank) => sum + (byBank[bank] ?? 0));
   }
 
   Future<Map<String, int>> balanceByBankPaise() async {
@@ -1818,10 +1850,115 @@ class LocalDbService {
   }
 
   Stream<List<ReconciliationResult>> get reconciliationStream =>
-      _streamOf(reconcile);
+      _streamOf('reconciliation', reconcile);
 
   Stream<List<TransactionModel>> get needsReviewStream =>
-      _streamOf(getNeedsReviewTransactions);
+      _streamOf('needsReview', getNeedsReviewTransactions);
+}
+
+/// One query, one subscription to `onChange`, any number of widgets.
+///
+/// The old shape gave every widget its own `async*` generator, so a single
+/// change re-ran the same SQL once per widget on screen, and any attempt to
+/// share or re-listen to one of those generators threw "Stream has already been
+/// listened to". Here the fetch and its result live in one place: subscribers
+/// get a cheap per-caller view of it, and the database is read once per change
+/// no matter how many of them there are.
+class _SharedQuery<T> {
+  _SharedQuery(this._fetch, Stream<void> changes) {
+    _out = StreamController<T>.broadcast(
+      onListen: () => _changeSub ??= changes.listen((_) => _refreshQuietly()),
+      // Nobody is watching, so stop watching for changes too — that is what
+      // keeps a closed screen from holding a live subscription. The cached
+      // value is kept but marked stale, so the next subscriber re-reads rather
+      // than painting whatever was true when the screen was closed.
+      onCancel: () {
+        _changeSub?.cancel();
+        _changeSub = null;
+        _stale = true;
+      },
+    );
+  }
+
+  final Future<T> Function() _fetch;
+  late final StreamController<T> _out;
+  StreamSubscription<void>? _changeSub;
+
+  T? _last;
+  bool _hasLast = false;
+  bool _stale = false;
+
+  /// In-flight fetch, so a burst of `notifyChange()` — an import commits one
+  /// per batch — collapses into a single query instead of one per call.
+  Future<T>? _inFlight;
+
+  /// A multi-subscription stream: listening to the *same* stream object twice
+  /// is allowed, which is the whole point. Each subscriber is seeded with the
+  /// current value and then relays the shared one, so no caller can find itself
+  /// holding a stream that has already been listened to.
+  Stream<T> get stream => Stream<T>.multi((controller) {
+        var delivered = false;
+
+        final relay = _out.stream.listen(
+          (value) {
+            delivered = true;
+            controller.add(value);
+          },
+          onError: controller.addError,
+          onDone: controller.close,
+        );
+        controller.onCancel = relay.cancel;
+
+        if (_hasLast && !_stale) {
+          delivered = true;
+          controller.add(_last as T);
+        } else {
+          // The relay above delivers the result to everyone watching; this only
+          // covers the case where the fetch settled before the relay attached.
+          _refresh().then(
+            (value) {
+              if (!delivered && !controller.isClosed) {
+                delivered = true;
+                controller.add(value);
+              }
+            },
+            onError: (Object e, StackTrace st) {
+              if (!controller.isClosed) controller.addError(e, st);
+            },
+          );
+        }
+      });
+
+  Future<T> _refresh() => _inFlight ??= _run();
+
+  Future<T> _run() async {
+    try {
+      final value = await _fetch();
+      _last = value;
+      _hasLast = true;
+      _stale = false;
+      if (!_out.isClosed && _out.hasListener) _out.add(value);
+      return value;
+    } catch (e, st) {
+      if (!_out.isClosed && _out.hasListener) _out.addError(e, st);
+      rethrow;
+    } finally {
+      _inFlight = null;
+    }
+  }
+
+  /// Refresh driven by a change notification rather than by a subscriber: the
+  /// error has already gone out through [_out], so it must not also surface as
+  /// an unhandled future error.
+  void _refreshQuietly() {
+    _refresh().then((_) {}, onError: (Object _, StackTrace __) {});
+  }
+
+  Future<void> dispose() async {
+    await _changeSub?.cancel();
+    _changeSub = null;
+    await _out.close();
+  }
 }
 
 /// Outcome of a batch insert. Distinguishing "already had it" from "user had

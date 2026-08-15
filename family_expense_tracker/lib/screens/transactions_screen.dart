@@ -1213,13 +1213,17 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
   }
 
   void _showReorderDayBottomSheet(BuildContext context, DateTime day, String bankName) {
+    // Taken once for the lifetime of the sheet, so the sheet rebuilding does
+    // not restart the query behind it.
+    final transactions = _localDbService.getAllTransactionsStream();
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (context) {
         return StreamBuilder<List<TransactionModel>>(
-          stream: _localDbService.getAllTransactionsStream(),
+          stream: transactions,
           builder: (context, snapshot) {
             if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
             

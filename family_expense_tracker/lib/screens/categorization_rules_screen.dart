@@ -16,6 +16,11 @@ class _CategorizationRulesScreenState extends State<CategorizationRulesScreen> {
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = '';
 
+  // Read once: typing in the search box rebuilds this screen on every
+  // keystroke, and a stream created in build() would re-query each time.
+  late final Stream<List<CategorizationRule>> _rulesStream =
+      _db.categorizationRulesStream;
+
   @override
   void dispose() {
     _searchController.dispose();
@@ -38,7 +43,7 @@ class _CategorizationRulesScreenState extends State<CategorizationRulesScreen> {
           _buildSearchBar(),
           Expanded(
             child: StreamBuilder<List<CategorizationRule>>(
-              stream: _db.categorizationRulesStream,
+              stream: _rulesStream,
               builder: (context, snapshot) {
                 if (snapshot.connectionState == ConnectionState.waiting && !snapshot.hasData) {
                   return const Center(child: CircularProgressIndicator(color: AppColors.accent));

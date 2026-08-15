@@ -8,15 +8,19 @@ import 'transfer_review_screen.dart';
 import 'pdf_statement_screen.dart';
 import 'sms_sync_screen.dart';
 import 'transactions_screen.dart';
-import '../services/export_service.dart';
 
 import '../theme/app_colors.dart';
-import 'package:intl/intl.dart';
+import '../utils/amount_display.dart';
+import '../widgets/balance_card.dart';
 import 'package:file_picker/file_picker.dart';
 import 'dart:io';
 
 class DashboardScreen extends StatefulWidget {
-  const DashboardScreen({super.key});
+  const DashboardScreen({super.key, required this.amountsHidden});
+
+  /// Owned by `MainScreen`, so the reveal survives a tab switch but not a
+  /// relaunch.
+  final ValueNotifier<bool> amountsHidden;
 
   @override
   State<DashboardScreen> createState() => _DashboardScreenState();
@@ -25,8 +29,19 @@ class DashboardScreen extends StatefulWidget {
 class _DashboardScreenState extends State<DashboardScreen> {
   final TransactionImportService _importer = TransactionImportService();
   final LocalDbService _localDbService = LocalDbService();
-  final PageController _pageController = PageController(viewportFraction: 0.9);
   bool _isFetching = false;
+
+  // Read once, not on every build. Rebuilding a StreamBuilder with a freshly
+  // minted stream made every setState — the fetch spinner below, for one —
+  // tear down its subscription and re-run the query behind it.
+  late final Stream<Map<String, double>> _statsStream =
+      _localDbService.dashboardStatsStream;
+  late final Stream<List<ReconciliationResult>> _reconciliationStream =
+      _localDbService.reconciliationStream;
+  late final Stream<List<TransactionModel>> _unassignedStream =
+      _localDbService.unassignedTransactionsStream;
+  late final Stream<List<Map<String, dynamic>>> _transferPairsStream =
+      _localDbService.potentialTransferPairsStream;
 
   Future<void> _fetchAndSaveSms() async {
     setState(() => _isFetching = true);
@@ -75,21 +90,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   @override
-  void dispose() {
-    _pageController.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
-        title: const Text('Family Tracker', 
+        title: const Text('Family Tracker',
           style: TextStyle(fontWeight: FontWeight.bold, color: AppColors.textPrimary)),
         backgroundColor: Colors.transparent,
         elevation: 0,
         actions: [
+          ValueListenableBuilder<bool>(
+            valueListenable: widget.amountsHidden,
+            builder: (context, hidden, _) => IconButton(
+              tooltip: hidden ? 'Show amounts' : 'Hide amounts',
+              onPressed: () => widget.amountsHidden.value = !hidden,
+              icon: Icon(
+                hidden ? Icons.visibility_off_outlined : Icons.visibility_outlined,
+                color: AppColors.textPrimary,
+              ),
+            ),
+          ),
           IconButton(
             onPressed: () => _showClearDataDialog(context),
             icon: const Icon(Icons.delete_forever, color: Colors.redAccent)
@@ -100,7 +120,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 context,
                 MaterialPageRoute(builder: (context) => const PdfStatementScreen()),
               );
-            }, 
+            },
             icon: const Icon(Icons.table_view, color: AppColors.textPrimary)
           ),
           IconButton(
@@ -109,7 +129,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 context,
                 MaterialPageRoute(builder: (context) => const AddTransactionScreen()),
               );
-            }, 
+            },
             icon: const Icon(Icons.add_circle_outline, color: AppColors.textPrimary)
           ),
           PopupMenuButton<String>(
@@ -155,35 +175,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
       body: SingleChildScrollView(
         physics: const BouncingScrollPhysics(),
         child: Padding(
-          padding: const EdgeInsets.all(20.0),
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 32),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _buildStatsCarousel(),
-              const SizedBox(height: 32),
-              _buildSmartInsightsSection(),
-              const SizedBox(height: 32),
-              _buildSectionHeader('Needs Tagging (Inbox)', onViewAll: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (context) => const TransactionsScreen(initialFilter: 'Unassigned')),
-                );
-              }),
-              const SizedBox(height: 16),
-              _buildInboxSection(),
-              const SizedBox(height: 32),
-              _buildSectionHeader('Monthly Budgets'),
-              const SizedBox(height: 16),
-              _buildBudgetSection(),
-              const SizedBox(height: 32),
-              _buildSectionHeader('Recent Insights', onViewAll: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (context) => const TransactionsScreen(initialFilter: 'All')),
-                );
-              }),
-              const SizedBox(height: 16),
-              _buildPlaceholderInsight(),
+              _buildBalanceSection(),
+              const SizedBox(height: 24),
+              _buildNeedsTaggingRow(),
+              _buildTransferReviewCard(),
             ],
           ),
         ),
@@ -199,73 +198,130 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  Widget _buildStatsCarousel() {
+  // ── Balances ────────────────────────────────────────────────────────────────
+
+  /// The whole money area, under one visibility listener so every figure on the
+  /// screen hides and reveals together.
+  Widget _buildBalanceSection() {
     return StreamBuilder<Map<String, double>>(
-      stream: _localDbService.dashboardStatsStream,
+      stream: _statsStream,
       builder: (context, snapshot) {
-        final stats = snapshot.data ?? {};
-        
-        return SizedBox(
-          height: 150,
-          child: PageView(
-            controller: _pageController,
-            physics: const BouncingScrollPhysics(),
+        final stats = snapshot.data ?? const <String, double>{};
+
+        return ValueListenableBuilder<bool>(
+          valueListenable: widget.amountsHidden,
+          builder: (context, hidden, _) => Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _buildOverviewCard(stats),
-              _buildAccountCard('Me (SBI)', stats['me_sbi_income'] ?? 0, stats['me_sbi_expense'] ?? 0, [const Color(0xFF1E40AF), const Color(0xFF3B82F6)]),
-              _buildAccountCard('Me (BoB)', stats['me_bob_income'] ?? 0, stats['me_bob_expense'] ?? 0, [const Color(0xFFEA580C), const Color(0xFFF97316)]),
-              _buildPersonCard("Mom's Balance", stats['mom_flow'] ?? 0, [const Color(0xFF701A75), const Color(0xFFD946EF)]),
-              _buildPersonCard("Dad's Balance", stats['dad_flow'] ?? 0, [const Color(0xFF134E4A), const Color(0xFF2DD4BF)]),
+              BalanceCard(
+                title: 'Total Balance (All Time)',
+                amount: stats['balance'] ?? 0,
+                hidden: hidden,
+                accent: AppColors.accent,
+                emphasis: BalanceCardEmphasis.primary,
+                trailing: _buildReconciliationChip(),
+                footer: _buildMonthFlowFooter(stats, hidden),
+              ),
+              const SizedBox(height: 12),
+              _cardRow([
+                BalanceCard(
+                  title: 'Me (SBI)',
+                  amount: stats['sbi_balance'] ?? 0,
+                  hidden: hidden,
+                  caption: 'account balance',
+                ),
+                BalanceCard(
+                  title: 'Me (BoB)',
+                  amount: stats['bob_balance'] ?? 0,
+                  hidden: hidden,
+                  caption: 'account balance',
+                ),
+              ]),
+              const SizedBox(height: 20),
+              // Mom and Dad spend out of the two accounts above, so what they
+              // have is a flow, not a balance of their own. Saying so here is
+              // what stops the four cards reading as four pots of money.
+              const Text(
+                'Spent from these accounts',
+                style: TextStyle(
+                  color: AppColors.textSecondary,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 12),
+              _cardRow([
+                BalanceCard(
+                  title: 'Mom',
+                  amount: stats['mom_flow'] ?? 0,
+                  hidden: hidden,
+                  caption: 'this month',
+                  signed: true,
+                ),
+                BalanceCard(
+                  title: 'Dad',
+                  amount: stats['dad_flow'] ?? 0,
+                  hidden: hidden,
+                  caption: 'this month',
+                  signed: true,
+                ),
+              ]),
             ],
           ),
         );
-      }
+      },
     );
   }
 
-  Widget _buildOverviewCard(Map<String, double> stats) {
-    final income = stats['total_income'] ?? 0.0;
-    final expense = stats['total_expense'] ?? 0.0;
-    final balance = stats['balance'] ?? 0.0;
-    final currencyFormat = NumberFormat.currency(symbol: '₹', decimalDigits: 2);
-
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 8),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [Color(0xFF1E293B), Color(0xFF334155)],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(24),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 10, offset: const Offset(0, 5))],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+  /// Two cards side by side, matched in height whatever their content.
+  Widget _cardRow(List<Widget> cards) {
+    return IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            children: [
-              const Text('Total Balance (All-Time)', style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600)),
-              const SizedBox(width: 8),
-              _buildReconciliationChip(),
-            ],
-          ),
-          const SizedBox(height: 4),
-          Text(currencyFormat.format(balance),
-            style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
-          const Spacer(),
-          const Text("This Month's Flow", style: TextStyle(color: Colors.white54, fontSize: 10, fontWeight: FontWeight.w600)),
-          const SizedBox(height: 4),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              _buildMiniStat('Income', currencyFormat.format(income), Icons.arrow_upward),
-              _buildMiniStat('Expenses', currencyFormat.format(expense), Icons.arrow_downward),
-            ],
-          )
+          Expanded(child: cards[0]),
+          const SizedBox(width: 12),
+          Expanded(child: cards[1]),
         ],
       ),
+    );
+  }
+
+  Widget _buildMonthFlowFooter(Map<String, double> stats, bool hidden) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        _buildFlowStat('In this month', stats['total_income'] ?? 0,
+            Icons.arrow_downward, AppColors.credit, hidden),
+        _buildFlowStat('Out this month', stats['total_expense'] ?? 0,
+            Icons.arrow_upward, AppColors.debit, hidden),
+      ],
+    );
+  }
+
+  Widget _buildFlowStat(
+      String label, double value, IconData icon, Color color, bool hidden) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 14, color: color),
+        const SizedBox(width: 6),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label,
+                style: const TextStyle(
+                    color: AppColors.textSecondary, fontSize: 10)),
+            Text(
+              displayAmount(value, hidden: hidden, decimals: 0),
+              style: const TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+      ],
     );
   }
 
@@ -274,7 +330,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   /// reconciliation view — the number itself is never adjusted to match.
   Widget _buildReconciliationChip() {
     return StreamBuilder<List<ReconciliationResult>>(
-      stream: _localDbService.reconciliationStream,
+      stream: _reconciliationStream,
       builder: (context, snapshot) {
         final results = snapshot.data;
         if (results == null || results.isEmpty) return const SizedBox.shrink();
@@ -318,348 +374,101 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  Widget _buildAccountCard(String title, double income, double expense, List<Color> colors) {
-    final currencyFormat = NumberFormat.currency(symbol: '₹', decimalDigits: 2);
+  // ── Actionable rows ─────────────────────────────────────────────────────────
 
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 8),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(colors: colors, begin: Alignment.topLeft, end: Alignment.bottomRight),
-        borderRadius: BorderRadius.circular(24),
-        boxShadow: [BoxShadow(color: colors[0].withOpacity(0.3), blurRadius: 10, offset: const Offset(0, 5))],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(title, style: const TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.w600)),
-          const Spacer(),
-          Text('Net: ${currencyFormat.format(income - expense)}',
-            style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 16),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              _buildMiniStat('In', currencyFormat.format(income), Icons.add),
-              _buildMiniStat('Out', currencyFormat.format(expense), Icons.remove),
-            ],
-          )
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPersonCard(String title, double balance, List<Color> colors) {
-    final currencyFormat = NumberFormat.currency(symbol: '₹', decimalDigits: 2);
-    final isNegative = balance < 0;
-    final displayBalance = balance.abs();
-
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 8),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(colors: colors, begin: Alignment.topLeft, end: Alignment.bottomRight),
-        borderRadius: BorderRadius.circular(24),
-        boxShadow: [BoxShadow(color: colors[0].withOpacity(0.3), blurRadius: 10, offset: const Offset(0, 5))],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text(title, style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 12),
-          Text(
-            '${isNegative ? '-' : ''}${currencyFormat.format(displayBalance)}',
-            style: TextStyle(
-              color: isNegative ? Colors.redAccent.shade100 : Colors.greenAccent.shade100, 
-              fontSize: 32, 
-              fontWeight: FontWeight.bold
-            )
-          ),
-          const SizedBox(height: 8),
-          const Text('Net Monthly Flow', style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.w600)),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildMiniStat(String label, String value, IconData icon) {
-    return Row(
-      children: [
-        Container(
-          padding: const EdgeInsets.all(6),
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.2),
-            shape: BoxShape.circle,
-          ),
-          child: Icon(icon, size: 14, color: Colors.white),
-        ),
-        const SizedBox(width: 8),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(label, style: const TextStyle(color: Colors.white70, fontSize: 12)),
-            Text(value, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-          ],
-        )
-      ],
-    );
-  }
-
-  Widget _buildSectionHeader(String title, {VoidCallback? onViewAll}) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        Text(title, 
-          style: const TextStyle(
-            color: AppColors.textPrimary, 
-            fontSize: 18, 
-            fontWeight: FontWeight.bold
-          )),
-        if (onViewAll != null)
-          TextButton(
-            onPressed: onViewAll, 
-            child: const Text('View All', style: TextStyle(color: AppColors.accent))
-          ),
-      ],
-    );
-  }
-
-  Widget _buildInboxSection() {
+  /// The tagging inbox itself lives on the Transactions tab, behind its
+  /// existing 'Unassigned' filter. Home only says how much is waiting.
+  Widget _buildNeedsTaggingRow() {
     return StreamBuilder<List<TransactionModel>>(
-      stream: _localDbService.unassignedTransactionsStream,
+      stream: _unassignedStream,
       builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting && !snapshot.hasData) {
-          return const Center(child: CircularProgressIndicator(color: AppColors.accent));
-        }
-        final transactions = snapshot.data ?? [];
+        final count = snapshot.data?.length ?? 0;
+        if (count == 0) return const SizedBox.shrink();
 
-        if (transactions.isEmpty) {
-          return Container(
-            height: 180,
-            width: double.infinity,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: AppColors.surface,
-              borderRadius: BorderRadius.circular(20),
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: _buildActionRow(
+            icon: Icons.label_outline,
+            color: AppColors.accent,
+            title: '$count transaction${count == 1 ? '' : 's'} need tagging',
+            subtitle: 'Assign them to Me, Mom or Dad',
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) =>
+                    const TransactionsScreen(initialFilter: 'Unassigned'),
+              ),
             ),
-            child: const Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(Icons.done_all, color: Colors.green, size: 40),
-                SizedBox(height: 12),
-                Text('All caught up!', style: TextStyle(color: AppColors.textSecondary)),
-              ],
-            ),
-          );
-        }
-
-        return SizedBox(
-          height: 200,
-          child: ListView.builder(
-            scrollDirection: Axis.horizontal,
-            physics: const BouncingScrollPhysics(),
-            itemCount: transactions.length,
-            itemBuilder: (context, index) {
-              final txn = transactions[index];
-              return _buildTransactionCard(txn);
-            },
           ),
         );
-      }
+      },
     );
   }
 
-  Widget _buildTransactionCard(TransactionModel txn) {
-  final currencyFormat = NumberFormat.currency(symbol: '₹', decimalDigits: 2);
-
-  return Container(
-    width: 280,
-    margin: const EdgeInsets.only(right: 16),
-    padding: const EdgeInsets.all(20),
-    decoration: BoxDecoration(
-      color: AppColors.surface,
-      borderRadius: BorderRadius.circular(24),
-      border: Border.all(color: Colors.white.withOpacity(0.05)),
-      boxShadow: [
-        BoxShadow(
-          color: Colors.black.withOpacity(0.2),
-          blurRadius: 15,
-          offset: const Offset(0, 8),
-        ),
-      ],
-    ),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Flexible(
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: AppColors.accent.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  txn.bankName,
-                  style: const TextStyle(
-                      color: AppColors.accent,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 12),
-                  overflow: TextOverflow.ellipsis,
-                  maxLines: 1,
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Text(
-              DateFormat('dd MMM').format(txn.date),
-              style: const TextStyle(
-                  color: AppColors.textSecondary, fontSize: 12),
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Expanded(
-              child: Text(
-                txn.description,
-                style: const TextStyle(
-                    color: AppColors.textPrimary,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold),
-                overflow: TextOverflow.ellipsis,
-                maxLines: 1,
-              ),
-            ),
-            const SizedBox(width: 8),
-            _buildCategoryBadge(txn.category),
-          ],
-        ),
-        const SizedBox(height: 8),
-        Text(
-          currencyFormat.format(txn.amount),
-          style: const TextStyle(
-              color: AppColors.textPrimary,
-              fontSize: 24,
-              fontWeight: FontWeight.bold),
-        ),
-        const Spacer(),
-        Row(
-          children: [
-            Expanded(
-                child: _buildAssignButton(
-                    'Me', () async {
-                      await _localDbService.updateTransaction(txn.copyWith(assignedTo: 'Me'));
-                    })),
-            const SizedBox(width: 8),
-            Expanded(
-                child: _buildAssignButton('Mom',
-                    () async {
-                      await _localDbService.updateTransaction(txn.copyWith(assignedTo: 'Mom'));
-                    })),
-            const SizedBox(width: 8),
-            Expanded(
-                child: _buildAssignButton('Dad',
-                    () async {
-                      await _localDbService.updateTransaction(txn.copyWith(assignedTo: 'Dad'));
-                    })),
-          ],
-        )
-      ],
-    ),
-  );
-}
-
-  Widget _buildAssignButton(String label, VoidCallback onPressed) {
-    return ElevatedButton(
-      onPressed: onPressed,
-      style: ElevatedButton.styleFrom(
-        backgroundColor: Colors.white.withOpacity(0.05),
-        foregroundColor: AppColors.textPrimary,
-        elevation: 0,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        minimumSize: Size.zero, // Important for narrow buttons
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-        textStyle: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
-      ),
-      child: Text(label),
-    );
-  }
-
-  Widget _buildPlaceholderInsight() {
-    return StreamBuilder<List<TransactionModel>>(
-      stream: _localDbService.recentTransactionsStream,
+  Widget _buildTransferReviewCard() {
+    return StreamBuilder<List<Map<String, dynamic>>>(
+      stream: _transferPairsStream,
       builder: (context, snapshot) {
-        if (!snapshot.hasData || (snapshot.data?.isEmpty ?? true)) {
-          return Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: AppColors.surface,
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: const Text('No recent activities to show.', 
-              style: TextStyle(color: AppColors.textSecondary)),
-          );
-        }
+        final count = snapshot.data?.length ?? 0;
+        if (count == 0) return const SizedBox.shrink();
 
-        final txns = snapshot.data!;
-        return Column(
-          children: txns.map((txn) {
-            final isCredit = txn.type == 'credit';
-            return Container(
-              width: double.infinity,
-              margin: const EdgeInsets.only(bottom: 12),
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: AppColors.surface,
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Row(
+        return _buildActionRow(
+          icon: Icons.swap_horiz_rounded,
+          color: Colors.teal,
+          title: '$count possible transfer${count == 1 ? '' : 's'} detected',
+          subtitle: 'Review to keep spending totals accurate',
+          onTap: () => Navigator.push(context,
+              MaterialPageRoute(builder: (_) => const TransferReviewScreen())),
+        );
+      },
+    );
+  }
+
+  Widget _buildActionRow({
+    required IconData icon,
+    required Color color,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: color.withOpacity(0.3)),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, color: color, size: 20),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  CircleAvatar(
-                    backgroundColor: isCredit ? Colors.green.withOpacity(0.2) : Colors.red.withOpacity(0.2),
-                    radius: 20,
-                    child: Icon(
-                      isCredit ? Icons.arrow_downward : Icons.arrow_upward, 
-                      color: isCredit ? Colors.green : Colors.red,
-                      size: 20,
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(txn.description, 
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.bold)),
-                        const SizedBox(height: 4),
-                        Text(DateFormat('dd MMM hh:mm a').format(txn.date), 
-                          style: const TextStyle(color: AppColors.textSecondary, fontSize: 12)),
-                      ],
-                    ),
-                  ),
                   Text(
-                    '${isCredit ? '+' : '-'}₹${txn.amount.toStringAsFixed(2)}',
-                    style: TextStyle(
-                      color: isCredit ? Colors.green : Colors.red,
-                      fontWeight: FontWeight.bold,
-                    ),
+                    title,
+                    style: const TextStyle(
+                        color: AppColors.textPrimary,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    style: const TextStyle(
+                        color: AppColors.textSecondary, fontSize: 12),
                   ),
                 ],
               ),
-            );
-          }).toList(),
-        );
-      }
+            ),
+            const Icon(Icons.chevron_right, color: AppColors.textSecondary),
+          ],
+        ),
+      ),
     );
   }
 
@@ -683,524 +492,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
             child: const Text('Delete', style: TextStyle(color: Colors.red)),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildCategoryBadge(String category) {
-    Color badgeColor;
-    switch (category) {
-      case 'Groceries': badgeColor = Colors.green; break;
-      case 'Dining': badgeColor = Colors.orange; break;
-      case 'Shopping': badgeColor = Colors.pink; break;
-      case 'Utilities': badgeColor = Colors.blue; break;
-      case 'Salary': badgeColor = Colors.purple; break;
-      case 'Healthcare': badgeColor = Colors.red; break;
-      case 'Transportation': badgeColor = Colors.teal; break;
-      case 'Education': badgeColor = Colors.indigo; break;
-      case 'Gifts': badgeColor = Colors.amber; break;
-      default: badgeColor = const Color(0xFF64748B);
-    }
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: badgeColor.withOpacity(0.15),
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: Text(
-        category,
-        style: TextStyle(
-            color: badgeColor, fontSize: 11, fontWeight: FontWeight.bold),
-      ),
-    );
-  }
-
-  // ── Smart Insights ──────────────────────────────────────────────────────────
-
-  Widget _buildSmartInsightsSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _buildSectionHeader('Smart Insights'),
-        const SizedBox(height: 16),
-        _buildTransferReviewCard(),
-        const SizedBox(height: 12),
-        _buildForecastCard(),
-        const SizedBox(height: 12),
-        _buildAnomaliesCard(),
-      ],
-    );
-  }
-
-  Widget _buildTransferReviewCard() {
-    return StreamBuilder<List<Map<String, dynamic>>>(
-      stream: _localDbService.potentialTransferPairsStream,
-      builder: (context, snapshot) {
-        final count = snapshot.data?.length ?? 0;
-        if (count == 0) return const SizedBox.shrink();
-
-        return GestureDetector(
-          onTap: () => Navigator.push(context,
-              MaterialPageRoute(builder: (_) => const TransferReviewScreen())),
-          child: Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-            decoration: BoxDecoration(
-              color: AppColors.surface,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: Colors.teal.withOpacity(0.35)),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: Colors.teal.withOpacity(0.12),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Icon(Icons.swap_horiz_rounded,
-                      color: Colors.teal, size: 22),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '$count possible transfer${count == 1 ? '' : 's'} detected',
-                        style: const TextStyle(
-                            color: AppColors.textPrimary,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 14),
-                      ),
-                      const SizedBox(height: 2),
-                      const Text(
-                        'Review to keep spending totals accurate',
-                        style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
-                      ),
-                    ],
-                  ),
-                ),
-                const Icon(Icons.chevron_right, color: AppColors.textSecondary),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildForecastCard() {
-    return StreamBuilder<Map<String, dynamic>>(
-      stream: _localDbService.forecastStream,
-      builder: (context, snapshot) {
-        if (!snapshot.hasData) return const SizedBox.shrink();
-        final data = snapshot.data!;
-        final current = data['currentSpend'] as double;
-        final forecast = data['forecastedSpend'] as double;
-        final daysElapsed = data['daysElapsed'] as int;
-        final totalDays = data['totalDays'] as int;
-        final totalBudget = data['totalBudget'] as double;
-        final currencyFormat = NumberFormat.currency(symbol: '₹', decimalDigits: 0);
-
-        if (forecast == 0) return const SizedBox.shrink();
-
-        final hasBudget = totalBudget > 0;
-        final isOver = hasBudget && forecast > totalBudget;
-        final progress = hasBudget ? (forecast / totalBudget).clamp(0.0, 1.0) : null;
-        final accentColor = isOver ? AppColors.debit : AppColors.accent;
-
-        return Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(
-            color: AppColors.surface,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: accentColor.withOpacity(0.25)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Icon(isOver ? Icons.trending_up_rounded : Icons.insights_rounded,
-                      color: accentColor, size: 20),
-                  const SizedBox(width: 10),
-                  Text('Month-End Forecast',
-                      style: TextStyle(
-                          color: accentColor, fontWeight: FontWeight.bold, fontSize: 14)),
-                  const Spacer(),
-                  Text('Day $daysElapsed / $totalDays',
-                      style: const TextStyle(color: AppColors.textSecondary, fontSize: 11)),
-                ],
-              ),
-              const SizedBox(height: 16),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(currencyFormat.format(forecast),
-                      style: TextStyle(
-                          color: accentColor,
-                          fontSize: 28,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: -1)),
-                  const SizedBox(width: 8),
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 4),
-                    child: Text('projected',
-                        style: const TextStyle(
-                            color: AppColors.textSecondary, fontSize: 12)),
-                  ),
-                  if (hasBudget) ...[
-                    const Spacer(),
-                    Text(
-                      '/ ${currencyFormat.format(totalBudget)} budget',
-                      style: TextStyle(
-                          color: isOver ? AppColors.debit : AppColors.textSecondary,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600),
-                    ),
-                  ],
-                ],
-              ),
-              const SizedBox(height: 4),
-              Text(
-                '${currencyFormat.format(current)} spent so far',
-                style: const TextStyle(color: AppColors.textSecondary, fontSize: 12),
-              ),
-              if (progress != null) ...[
-                const SizedBox(height: 12),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
-                  child: LinearProgressIndicator(
-                    value: progress,
-                    backgroundColor: Colors.white.withOpacity(0.05),
-                    color: accentColor,
-                    minHeight: 5,
-                  ),
-                ),
-                if (isOver)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: Text(
-                      '⚠ Projected to exceed budget by ${currencyFormat.format(forecast - totalBudget)}',
-                      style: const TextStyle(color: AppColors.debit, fontSize: 11),
-                    ),
-                  ),
-              ],
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildAnomaliesCard() {
-    return StreamBuilder<List<Map<String, dynamic>>>(
-      stream: _localDbService.anomaliesStream,
-      builder: (context, snapshot) {
-        final anomalies = snapshot.data ?? [];
-        if (anomalies.isEmpty) return const SizedBox.shrink();
-
-        final currencyFormat = NumberFormat.currency(symbol: '₹', decimalDigits: 0);
-
-        return Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(
-            color: AppColors.surface,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: Colors.amber.withOpacity(0.25)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  const Icon(Icons.warning_amber_rounded, color: Colors.amber, size: 20),
-                  const SizedBox(width: 10),
-                  const Text('Spending Spikes',
-                      style: TextStyle(
-                          color: Colors.amber,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14)),
-                  const Spacer(),
-                  Text('vs 3-month avg',
-                      style: TextStyle(
-                          color: AppColors.textSecondary.withOpacity(0.6), fontSize: 11)),
-                ],
-              ),
-              const SizedBox(height: 16),
-              ...anomalies.take(3).map((a) {
-                final cat = a['category'] as String;
-                final current = a['currentAmount'] as double;
-                final avg = a['avgAmount'] as double;
-                final ratio = a['ratio'] as double;
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(cat,
-                                style: const TextStyle(
-                                    color: AppColors.textPrimary,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 14)),
-                            const SizedBox(height: 2),
-                            Text(
-                              '${currencyFormat.format(current)} this month  •  avg ${currencyFormat.format(avg)}',
-                              style: const TextStyle(
-                                  color: AppColors.textSecondary, fontSize: 11),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: AppColors.debit.withOpacity(0.12),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          '↑ ${ratio.toStringAsFixed(1)}×',
-                          style: const TextStyle(
-                              color: AppColors.debit,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 13),
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              }),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildBudgetSection() {
-    return StreamBuilder<List<Map<String, dynamic>>>(
-      stream: _localDbService.budgetProgressStream,
-      builder: (context, snapshot) {
-        if (!snapshot.hasData || (snapshot.data?.isEmpty ?? true)) {
-          return Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: AppColors.surface,
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Row(
-              children: [
-                const Icon(Icons.info_outline, color: AppColors.textSecondary, size: 20),
-                const SizedBox(width: 12),
-                const Expanded(
-                  child: Text('No budgets set. Click here to start budgeting!', 
-                    style: TextStyle(color: AppColors.textSecondary, fontSize: 13)),
-                ),
-                TextButton(
-                  onPressed: () => _showSetBudgetDialog(context),
-                  child: const Text('Add', style: TextStyle(color: AppColors.accent)),
-                )
-              ],
-            ),
-          );
-        }
-
-        final budgets = snapshot.data!;
-        return SizedBox(
-          height: 110,
-          child: ListView.builder(
-            scrollDirection: Axis.horizontal,
-            physics: const BouncingScrollPhysics(),
-            itemCount: budgets.length + 1,
-            itemBuilder: (context, index) {
-              if (index == budgets.length) {
-                return _buildAddBudgetCard();
-              }
-              final budget = budgets[index];
-              return _buildBudgetCard(budget);
-            },
-          ),
-        );
-      }
-    );
-  }
-
-  Widget _buildBudgetCard(Map<String, dynamic> budget) {
-    final spent = budget['spent'] as double;
-    final limit = budget['limit'] as double;
-    final category = budget['category'] as String;
-    final percent = (spent / limit).clamp(0.0, 1.0);
-    final isOver = spent > limit;
-
-    return Container(
-      width: 180,
-      margin: const EdgeInsets.only(right: 16),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: isOver ? Colors.red.withOpacity(0.3) : Colors.white.withOpacity(0.05)),
-      ),
-      child: InkWell(
-        onTap: () => _showSetBudgetDialog(context, category: category, currentAmount: limit),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Expanded(
-                  child: Text(category, 
-                    maxLines: 1, overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.bold, fontSize: 13)),
-                ),
-                Text('${(percent * 100).toStringAsFixed(0)}%', 
-                  style: TextStyle(color: isOver ? Colors.red : AppColors.textSecondary, fontSize: 10, fontWeight: FontWeight.bold)),
-              ],
-            ),
-            const Spacer(),
-            Row(
-              children: [
-                Text('₹${spent.toStringAsFixed(0)}', style: const TextStyle(color: AppColors.textPrimary, fontSize: 14, fontWeight: FontWeight.bold)),
-                Text(' / ₹${limit.toStringAsFixed(0)}', style: const TextStyle(color: AppColors.textSecondary, fontSize: 10)),
-              ],
-            ),
-            const SizedBox(height: 8),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: LinearProgressIndicator(
-                value: percent,
-                backgroundColor: Colors.white.withOpacity(0.05),
-                color: isOver ? Colors.red : AppColors.accent,
-                minHeight: 4,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildAddBudgetCard() {
-    return Container(
-      width: 60,
-      margin: const EdgeInsets.only(right: 16),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white.withOpacity(0.05), style: BorderStyle.solid),
-      ),
-      child: IconButton(
-        onPressed: () => _showSetBudgetDialog(context),
-        icon: const Icon(Icons.add, color: AppColors.textSecondary),
-      ),
-    );
-  }
-
-  void _showSetBudgetDialog(BuildContext context, {String? category, double? currentAmount}) {
-    final amountController = TextEditingController(text: currentAmount?.toStringAsFixed(0) ?? '');
-    String selectedCategory = category ?? TransactionModel.availableCategories.first;
-    String? suggestionText;
-    bool loadingStarted = false;
-
-    Future<void> loadSuggestion(String cat, Function setDialogState) async {
-      final avg = await _localDbService.getCategoryAverage(cat);
-      if (avg > 0) {
-        setDialogState(() {
-          suggestionText = '3-month avg: ₹${avg.toStringAsFixed(0)}';
-          if (amountController.text.isEmpty) {
-            amountController.text = avg.toStringAsFixed(0);
-          }
-        });
-      }
-    }
-
-    showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) {
-          if (category == null && suggestionText == null && !loadingStarted) {
-            loadingStarted = true;
-            loadSuggestion(selectedCategory, setDialogState);
-          }
-          return AlertDialog(
-            backgroundColor: AppColors.surface,
-            title: Text(category == null ? 'Set New Budget' : 'Update $category Budget',
-              style: const TextStyle(color: AppColors.textPrimary)),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (category == null)
-                  DropdownButtonFormField<String>(
-                    value: selectedCategory,
-                    dropdownColor: AppColors.surface,
-                    style: const TextStyle(color: AppColors.textPrimary),
-                    decoration: const InputDecoration(
-                      labelText: 'Category',
-                      labelStyle: TextStyle(color: AppColors.textSecondary)),
-                    items: TransactionModel.availableCategories
-                        .map((c) => DropdownMenuItem(value: c, child: Text(c)))
-                        .toList(),
-                    onChanged: (val) {
-                      selectedCategory = val!;
-                      amountController.clear();
-                      loadingStarted = false;
-                      setDialogState(() => suggestionText = null);
-                      loadSuggestion(val, setDialogState);
-                    },
-                  ),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: amountController,
-                  keyboardType: TextInputType.number,
-                  autofocus: category != null,
-                  style: const TextStyle(color: AppColors.textPrimary),
-                  decoration: InputDecoration(
-                    labelText: 'Monthly Limit (₹)',
-                    labelStyle: const TextStyle(color: AppColors.textSecondary),
-                    helperText: suggestionText,
-                    helperStyle: const TextStyle(color: AppColors.accent, fontSize: 11),
-                    enabledBorder: const UnderlineInputBorder(
-                        borderSide: BorderSide(color: AppColors.accent)),
-                    focusedBorder: const UnderlineInputBorder(
-                        borderSide: BorderSide(color: AppColors.accent, width: 2)),
-                  ),
-                ),
-              ],
-            ),
-        actions: [
-          if (category != null)
-            TextButton(
-              onPressed: () async {
-                await _localDbService.deleteBudget(category);
-                if (mounted) Navigator.pop(ctx);
-              },
-              child: const Text('Delete', style: TextStyle(color: Colors.red)),
-            ),
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          ElevatedButton(
-            onPressed: () async {
-              final amount = double.tryParse(amountController.text);
-              if (amount != null && amount > 0) {
-                await _localDbService.saveBudget(selectedCategory, amount);
-                if (mounted) Navigator.pop(ctx);
-              }
-            },
-            style: ElevatedButton.styleFrom(backgroundColor: AppColors.accent),
-            child: const Text('Save', style: TextStyle(color: Colors.white)),
-          ),
-        ],
-      );
-        },
       ),
     );
   }
