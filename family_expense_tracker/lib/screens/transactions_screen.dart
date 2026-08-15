@@ -803,27 +803,56 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                     const SizedBox(height: 24),
 
                     // Layout: Amount (Large)
-                    // Amount Input
-                    TextFormField(
-                      controller: amountController,
-                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: amountColor,
-                        fontSize: 36,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: -1,
-                      ),
-                      // No prefixText for the sign: a prefix makes
-                      // TextAlign.center centre only the editable half, so the
-                      // number sat off-centre and drifted as it was typed.
-                      // Direction is already carried by the colour and by the
-                      // "Credit/Debit Transaction" line directly beneath.
-                      decoration: InputDecoration(
-                        border: InputBorder.none,
-                        hintText: '0.00',
-                        hintStyle: TextStyle(color: amountColor.withOpacity(0.3)),
-                      ),
+                    //
+                    // The sign is a sibling of the field rather than a
+                    // prefixText. A prefix leaves TextAlign.center centring
+                    // only the editable half inside the room the prefix left
+                    // over, so the number sat off-centre and slid sideways
+                    // with every digit typed. As a Row the sign and the number
+                    // centre together, which is what they read as.
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          isCredit ? '+' : '-',
+                          style: TextStyle(
+                            color: amountColor,
+                            fontSize: 36,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: -1,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        // IntrinsicWidth makes the field hug its text so the
+                        // pair stays centred as it grows; the minimum keeps an
+                        // empty field wide enough to show its hint and still
+                        // be tappable.
+                        Flexible(
+                          child: IntrinsicWidth(
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(minWidth: 90),
+                              child: TextFormField(
+                                controller: amountController,
+                                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  color: amountColor,
+                                  fontSize: 36,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: -1,
+                                ),
+                                decoration: InputDecoration(
+                                  border: InputBorder.none,
+                                  isDense: true,
+                                  contentPadding: EdgeInsets.zero,
+                                  hintText: '0.00',
+                                  hintStyle: TextStyle(color: amountColor.withOpacity(0.3)),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                     const SizedBox(height: 8),
                     Text(
