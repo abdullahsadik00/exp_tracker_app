@@ -49,8 +49,10 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
   void initState() {
     super.initState();
     _ym = AnalyticsRepository.ymOf(DateTime.now());
+    // Assigned directly rather than through _reload: the first build has not
+    // run yet, so there is no state to notify.
+    _snapshot = _repo.load(_ym);
     _loadMonths();
-    _reload();
     _dbChanges = LocalDbService.instance.onChange.listen((_) {
       if (!mounted) return;
       _loadMonths();
@@ -67,22 +69,43 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
   Future<void> _loadMonths() async {
     final months = await _repo.availableMonths();
     if (!mounted) return;
+
+    // The selected month can disappear — delete a month's last transaction and
+    // it drops out of the list. Fall back to the newest month and reload with
+    // it, so the header and the figures below it never describe different
+    // months.
+    final fallback = !months.contains(_ym) && months.isNotEmpty;
+    final ym = fallback ? months.first : _ym;
+    final future = fallback ? _repo.load(ym) : null;
+
     setState(() {
       _months = months;
-      if (!_months.contains(_ym) && _months.isNotEmpty) _ym = _months.first;
+      _ym = ym;
+      if (future != null) _snapshot = future;
     });
   }
 
   void _reload() {
-    setState(() => _snapshot = _repo.load(_ym));
+    // Kick the query off outside setState, then swap the field in a block
+    // body. An arrow body would hand setState the assignment's value — the
+    // Future itself — which it rejects.
+    final future = _repo.load(_ym);
+    if (!mounted) {
+      _snapshot = future;
+      return;
+    }
+    setState(() {
+      _snapshot = future;
+    });
   }
 
   void _selectMonth(String ym) {
     if (ym == _ym) return;
+    final future = _repo.load(ym);
     setState(() {
       _ym = ym;
       _showAllCategories = false;
-      _snapshot = _repo.load(ym);
+      _snapshot = future;
     });
   }
 
