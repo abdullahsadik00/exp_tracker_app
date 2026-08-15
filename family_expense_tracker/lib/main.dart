@@ -5,6 +5,7 @@ import 'screens/dashboard_screen.dart';
 import 'screens/transactions_screen.dart';
 import 'screens/analytics_screen.dart';
 import 'screens/add_transaction_screen.dart';
+import 'models/txn_filter_request.dart';
 import 'services/native_sms_queue.dart';
 import 'services/transaction_import_service.dart';
 import 'theme/app_colors.dart';
@@ -52,12 +53,32 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   /// reveal has to survive a trip to Analytics and back, but not a relaunch.
   final ValueNotifier<bool> _amountsHidden = ValueNotifier<bool>(true);
 
-  late final List<Widget> _screens = [
-    DashboardScreen(amountsHidden: _amountsHidden),
-    const TransactionsScreen(),
-    const AddTransactionScreen(),
-    const AnalyticsScreen(),
-  ];
+  /// The filters Analytics last handed off. Held here because the handoff
+  /// crosses tabs: Analytics decides what is worth looking at, Transactions
+  /// shows the rows.
+  TxnFilterRequest? _txnFilter;
+
+  List<Widget> _buildScreens() => [
+        DashboardScreen(amountsHidden: _amountsHidden),
+        TransactionsScreen(
+          // A new request must rebuild the screen from scratch so its initial
+          // filters are picked up; without the key it would keep the state it
+          // already had and silently ignore the handoff.
+          key: ValueKey(_txnFilter),
+          initialFilter: _txnFilter?.person,
+          initialMonth: _txnFilter?.monthLabel,
+          initialCategory: _txnFilter?.category,
+        ),
+        const AddTransactionScreen(),
+        AnalyticsScreen(onViewTransactions: _openTransactions),
+      ];
+
+  void _openTransactions(TxnFilterRequest request) {
+    setState(() {
+      _txnFilter = request;
+      _currentIndex = 1;
+    });
+  }
 
   @override
   void initState() {
@@ -117,11 +138,14 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: _screens[_currentIndex],
+      body: _buildScreens()[_currentIndex],
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _currentIndex,
         onTap: (index) {
           setState(() {
+            // Tapping the tab directly means "show me everything" — a filter
+            // from a drill-down should not outlive the trip that set it.
+            if (index == 1) _txnFilter = null;
             _currentIndex = index;
           });
         },

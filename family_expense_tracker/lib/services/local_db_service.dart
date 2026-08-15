@@ -914,40 +914,9 @@ class LocalDbService {
     return stats;
   }
 
-  Future<List<TransactionModel>> getTransactionsByMonth(String monthYear) async {
-    final db = await database;
-    final date = DateFormat('MMM yyyy').parse(monthYear);
-    final sqlDate = DateFormat('yyyy-MM').format(date);
-    
-    final List<Map<String, dynamic>> maps = await db.query(
-      'transactions',
-      where: "date LIKE ?",
-      whereArgs: ['$sqlDate%'],
-      orderBy: 'date DESC',
-    );
-    return maps.map((m) => TransactionModel.fromJson(m)).toList();
-  }
-
-  Future<List<String>> getAvailableMonths() async {
-    final db = await database;
-    final List<Map<String, dynamic>> results = await db.rawQuery('''
-      SELECT DISTINCT SUBSTR(date, 1, 7) as month FROM transactions ORDER BY month DESC
-    ''');
-    
-    final List<String> months = [];
-    for (var row in results) {
-      final monthStr = row['month'] as String;
-      final date = DateFormat('yyyy-MM').parse(monthStr);
-      months.add(DateFormat('MMM yyyy').format(date));
-    }
-    
-    final currentMonth = DateFormat('MMM yyyy').format(DateTime.now());
-    if (!months.contains(currentMonth)) {
-      months.insert(0, currentMonth);
-    }
-    
-    return months;
-  }
+  // Month-scoped reads and month listing now live in AnalyticsRepository, which
+  // owns the one definition of what counts as spending. Two implementations of
+  // the same figure is how the totals drifted apart in the first place.
 
   Future<List<TransactionModel>> getFilteredTransactions({
     String? assignedTo,
@@ -1068,146 +1037,11 @@ class LocalDbService {
     notifyChange();
   }
 
-  Future<List<Map<String, dynamic>>> getBudgetProgress() async {
-    final db = await database;
-    final now = DateTime.now();
-    final monthStr = DateFormat('yyyy-MM').format(now);
-
-    // Get all budgets
-    final List<Map<String, dynamic>> budgets = await db.query('budgets');
-    
-    // Get spending per category for current month
-    final List<Map<String, dynamic>> spending = await db.rawQuery('''
-      SELECT category, SUM(amount) as total
-      FROM transactions
-      WHERE date LIKE ? AND type = 'debit'
-        AND $notTransfer AND $notFailed
-      GROUP BY category
-    ''', ['$monthStr%']);
-
-    Map<String, double> spendingMap = {
-      for (var row in spending) row['category'] as String: (row['total'] as num).toDouble()
-    };
-
-    return budgets.map((b) {
-      final category = b['category'] as String;
-      final limit = (b['amount'] as num).toDouble();
-      final spent = spendingMap[category] ?? 0.0;
-      return {
-        'category': category,
-        'limit': limit,
-        'spent': spent,
-      };
-    }).toList();
-  }
-
-  Future<double?> getCategoryBudget(String category) async {
-    final db = await database;
-    final List<Map<String, dynamic>> maps = await db.query(
-      'budgets',
-      where: 'category = ?',
-      whereArgs: [category],
-    );
-    if (maps.isNotEmpty) return (maps.first['amount'] as num).toDouble();
-    return null;
-  }
-
-  // ── Smart Intelligence ──────────────────────────────────────────────────────
-
-  /// Returns the 3-month average monthly spend for a category (excluding current month).
-  Future<double> getCategoryAverage(String category) async {
-    final db = await database;
-    final result = await db.rawQuery('''
-      SELECT AVG(monthly) as avg FROM (
-        SELECT strftime('%Y-%m', date) as m, SUM(amount) as monthly
-        FROM transactions
-        WHERE type = 'debit' AND category = ?
-          AND date >= date('now', '-4 months')
-          AND strftime('%Y-%m', date) != strftime('%Y-%m', 'now')
-          AND $notTransfer AND $notFailed
-        GROUP BY m
-      )
-    ''', [category]);
-    return (result.first['avg'] as num?)?.toDouble() ?? 0.0;
-  }
-
-  /// Returns categories where this month's spend is ≥ 1.5× the 3-month average.
-  Future<List<Map<String, dynamic>>> getSpendingAnomalies() async {
-    final db = await database;
-    final monthStr = DateFormat('yyyy-MM').format(DateTime.now());
-
-    final currentRows = await db.rawQuery('''
-      SELECT category, SUM(amount) as current_amount
-      FROM transactions
-      WHERE type = 'debit' AND date LIKE ?
-        AND $notTransfer AND $notFailed
-      GROUP BY category
-    ''', ['$monthStr%']);
-
-    final avgRows = await db.rawQuery('''
-      SELECT category, AVG(monthly) as avg_amount FROM (
-        SELECT category, strftime('%Y-%m', date) as m, SUM(amount) as monthly
-        FROM transactions
-        WHERE type = 'debit'
-          AND date >= date('now', '-4 months')
-          AND strftime('%Y-%m', date) != ?
-          AND $notTransfer AND $notFailed
-        GROUP BY category, m
-      )
-      GROUP BY category
-    ''', [monthStr]);
-
-    final avgMap = <String, double>{
-      for (final r in avgRows)
-        r['category'] as String: (r['avg_amount'] as num?)?.toDouble() ?? 0.0,
-    };
-
-    final anomalies = <Map<String, dynamic>>[];
-    for (final row in currentRows) {
-      final cat = row['category'] as String;
-      final current = (row['current_amount'] as num).toDouble();
-      final avg = avgMap[cat] ?? 0.0;
-      if (avg > 200 && current >= avg * 1.5) {
-        anomalies.add({
-          'category': cat,
-          'currentAmount': current,
-          'avgAmount': avg,
-          'ratio': current / avg,
-        });
-      }
-    }
-    anomalies.sort((a, b) => (b['ratio'] as double).compareTo(a['ratio'] as double));
-    return anomalies;
-  }
-
-  /// Projects end-of-month spend based on daily burn rate so far.
-  Future<Map<String, dynamic>> getMonthEndForecast() async {
-    final db = await database;
-    final now = DateTime.now();
-    final monthStr = DateFormat('yyyy-MM').format(now);
-    final daysElapsed = now.day;
-    final totalDays = DateTime(now.year, now.month + 1, 0).day;
-
-    final result = await db.rawQuery('''
-      SELECT SUM(amount) as current_spend
-      FROM transactions
-      WHERE type = 'debit' AND date LIKE '$monthStr%'
-        AND $notTransfer AND $notFailed
-    ''');
-    final currentSpend = (result.first['current_spend'] as num?)?.toDouble() ?? 0.0;
-    final forecastedSpend = daysElapsed > 0 ? (currentSpend / daysElapsed) * totalDays : 0.0;
-
-    final budgetsResult = await db.rawQuery('SELECT SUM(amount) as total FROM budgets');
-    final totalBudget = (budgetsResult.first['total'] as num?)?.toDouble() ?? 0.0;
-
-    return {
-      'currentSpend': currentSpend,
-      'forecastedSpend': forecastedSpend,
-      'daysElapsed': daysElapsed,
-      'totalDays': totalDays,
-      'totalBudget': totalBudget,
-    };
-  }
+  // Budget progress, category averages, spending anomalies and the month-end
+  // forecast moved to AnalyticsRepository. They were four more places that each
+  // decided for themselves what "spending" meant — one counted transfers, one
+  // averaged over all time, one over three months — which is precisely why the
+  // Analytics screen's cards disagreed with each other.
 
   // ── Transfer Detection ───────────────────────────────────────────────────────
 
@@ -1285,25 +1119,8 @@ class LocalDbService {
     return rows.map((r) => Map<String, dynamic>.from(r)).toList();
   }
 
-  Future<Map<String, double>> getYearlySpendingTrend() async {
-    final db = await database;
-    Map<String, double> trend = {};
-    
-    for (int i = 11; i >= 0; i--) {
-      final date = DateTime(DateTime.now().year, DateTime.now().month - i, 1);
-      final monthStr = DateFormat('yyyy-MM').format(date);
-      final monthKey = DateFormat('MMM').format(date);
-      
-      final result = await db.rawQuery('''
-        SELECT SUM(amount) as total FROM transactions
-        WHERE date LIKE '$monthStr%' AND type = 'debit'
-          AND $notTransfer AND $notFailed
-      ''');
-      
-      trend[monthKey] = (result.first['total'] as num?)?.toDouble() ?? 0.0;
-    }
-    return trend;
-  }
+  // The yearly trend moved to AnalyticsRepository, where it is one grouped
+  // query instead of twelve sequential ones.
 
   // Backup & Restore
   Future<void> backupDatabase() async {
@@ -1413,23 +1230,13 @@ class LocalDbService {
   Stream<List<TransactionModel>> get recentTransactionsStream =>
       _streamOf('recentTransactions', () => getRecentTransactions(limit: 3));
 
-  Stream<List<Map<String, dynamic>>> get budgetProgressStream =>
-      _streamOf('budgetProgress', getBudgetProgress);
-
-  Stream<List<String>> get availableMonthsStream =>
-      _streamOf('availableMonths', getAvailableMonths);
-
-  Stream<Map<String, double>> get yearlySpendingTrendStream =>
-      _streamOf('yearlySpendingTrend', getYearlySpendingTrend);
-
   Stream<List<CategorizationRule>> get categorizationRulesStream =>
       _streamOf('categorizationRules', getCategorizationRules);
 
-  Stream<List<Map<String, dynamic>>> get anomaliesStream =>
-      _streamOf('anomalies', getSpendingAnomalies);
-
-  Stream<Map<String, dynamic>> get forecastStream =>
-      _streamOf('forecast', getMonthEndForecast);
+  // The budget, month-list, trend, anomaly and forecast streams are gone with
+  // the queries behind them. Analytics reloads one snapshot from [onChange]
+  // instead of driving five streams that could each be at a different point in
+  // time on the same screen.
 
   Stream<List<Map<String, dynamic>>> get recurringPatternsStream =>
       _streamOf('recurringPatterns', getRecurringPatterns);

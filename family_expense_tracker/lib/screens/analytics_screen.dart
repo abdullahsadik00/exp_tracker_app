@@ -1,40 +1,110 @@
-import 'package:fl_chart/fl_chart.dart';
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+
 import '../models/transaction_model.dart';
+import '../models/txn_filter_request.dart';
+import '../services/analytics_repository.dart';
 import '../services/local_db_service.dart';
 import '../theme/app_colors.dart';
-import 'category_insights_screen.dart';
-import 'package:intl/intl.dart';
+import '../utils/amount_display.dart';
+import '../utils/money.dart';
+import '../widgets/category_detail_sheet.dart';
+import '../widgets/trend_chart.dart';
 
+/// Analytics, organised around the four questions a family actually asks:
+/// how are we doing, where did it go, who spent it, and is that more than
+/// before.
+///
+/// Everything on the screen comes from a single [AnalyticsSnapshot] loaded for
+/// the selected month. That is deliberate: the previous version drove six
+/// independent streams with three different definitions of "spending", so the
+/// headline total could not be reconciled with the chart beneath it. One
+/// snapshot means one loading state, one error state, and one set of numbers.
 class AnalyticsScreen extends StatefulWidget {
-  const AnalyticsScreen({super.key});
+  const AnalyticsScreen({super.key, this.onViewTransactions});
+
+  /// Opens the Transactions tab pre-filtered. Every drill-down on this screen
+  /// ends here rather than in a transaction list of its own.
+  final ValueChanged<TxnFilterRequest>? onViewTransactions;
 
   @override
   State<AnalyticsScreen> createState() => _AnalyticsScreenState();
 }
 
 class _AnalyticsScreenState extends State<AnalyticsScreen> {
-  final LocalDbService _localDbService = LocalDbService();
-  int touchedIndex = -1;
-  late String _selectedMonth;
+  final AnalyticsRepository _repo = AnalyticsRepository();
+  StreamSubscription<void>? _dbChanges;
 
-  // Read once, not on every build — a StreamBuilder handed a freshly minted
-  // stream re-subscribes and re-queries on every rebuild.
-  late final Stream<List<String>> _monthsStream =
-      _localDbService.availableMonthsStream;
-  late final Stream<Map<String, double>> _yearlyTrendStream =
-      _localDbService.yearlySpendingTrendStream;
-  late final Stream<Map<String, dynamic>> _forecastStream =
-      _localDbService.forecastStream;
-  late final Stream<List<Map<String, dynamic>>> _anomaliesStream =
-      _localDbService.anomaliesStream;
-  late final Stream<List<Map<String, dynamic>>> _budgetProgressStream =
-      _localDbService.budgetProgressStream;
+  late String _ym;
+  List<String> _months = const [];
+  Future<AnalyticsSnapshot>? _snapshot;
+  bool _showAllCategories = false;
+
+  /// Rows shown before "Show all". Five covers the categories worth acting on
+  /// in a typical month without turning the section into a scroll of its own.
+  static const int _topCategoryCount = 5;
 
   @override
   void initState() {
     super.initState();
-    _selectedMonth = DateFormat('MMM yyyy').format(DateTime.now());
+    _ym = AnalyticsRepository.ymOf(DateTime.now());
+    _loadMonths();
+    _reload();
+    _dbChanges = LocalDbService.instance.onChange.listen((_) {
+      if (!mounted) return;
+      _loadMonths();
+      _reload();
+    });
+  }
+
+  @override
+  void dispose() {
+    _dbChanges?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _loadMonths() async {
+    final months = await _repo.availableMonths();
+    if (!mounted) return;
+    setState(() {
+      _months = months;
+      if (!_months.contains(_ym) && _months.isNotEmpty) _ym = _months.first;
+    });
+  }
+
+  void _reload() {
+    setState(() => _snapshot = _repo.load(_ym));
+  }
+
+  void _selectMonth(String ym) {
+    if (ym == _ym) return;
+    setState(() {
+      _ym = ym;
+      _showAllCategories = false;
+      _snapshot = _repo.load(ym);
+    });
+  }
+
+  String get _monthLabel => AnalyticsRepository.shortLabelOf(_ym);
+
+  void _viewTransactions({String? category, String? person}) {
+    widget.onViewTransactions?.call(TxnFilterRequest(
+      monthLabel: _monthLabel,
+      category: category,
+      person: person,
+    ));
+  }
+
+  void _openCategory(String category) {
+    CategoryDetailSheet.show(
+      context,
+      category: category,
+      ym: _ym,
+      repository: _repo,
+      onViewTransactions: () => _viewTransactions(category: category),
+      onEditBudget: () => _showBudgetDialog(category: category),
+    );
   }
 
   @override
@@ -42,83 +112,85 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
-        title: const Text('Analytics', 
-          style: TextStyle(fontWeight: FontWeight.bold, color: AppColors.textPrimary)),
+        title: const Text('Analytics',
+            style: TextStyle(
+                fontWeight: FontWeight.bold, color: AppColors.textPrimary)),
         backgroundColor: Colors.transparent,
         elevation: 0,
       ),
-      body: StreamBuilder<List<String>>(
-        stream: _monthsStream,
-        builder: (context, monthSnapshot) {
-          if (monthSnapshot.connectionState == ConnectionState.waiting && !monthSnapshot.hasData) {
-            return const Center(child: CircularProgressIndicator(color: AppColors.accent));
-          }
-          final sortedMonths = monthSnapshot.data ?? [DateFormat('MMM yyyy').format(DateTime.now())];
-          if (!_selectedMonth.contains(' ') || !sortedMonths.contains(_selectedMonth)) {
-             _selectedMonth = sortedMonths.first;
-          }
-
-          return FutureBuilder<List<TransactionModel>>(
-            future: _localDbService.getTransactionsByMonth(_selectedMonth),
-            builder: (context, snapshot) {
-              if (snapshot.connectionState == ConnectionState.waiting && !snapshot.hasData) {
-                return const Center(child: CircularProgressIndicator(color: AppColors.accent));
-              }
-              if (snapshot.hasError) {
-                return Center(child: Text('Error: ${snapshot.error}', style: const TextStyle(color: Colors.red)));
-              }
-
-              final transactions = snapshot.data ?? [];
-              final debitTotals = _calculateDebitTotals(transactions);
-              final totalDebit = debitTotals.values.fold(0.0, (sum, val) => sum + val);
-
-              return SingleChildScrollView(
-                padding: const EdgeInsets.all(20.0),
-                child: Column(
-                  children: [
-                    _buildMonthFilter(sortedMonths),
-                    const SizedBox(height: 24),
-                    _buildTrendsButton(),
-                    const SizedBox(height: 24),
-                    if (totalDebit == 0) 
-                      _buildEmptyState()
-                    else ...[
-                      _buildInsightCard(totalDebit),
-                  const SizedBox(height: 32),
-                  _buildYearlyTrendSection(),
-                  const SizedBox(height: 32),
-                  _buildChartSection(debitTotals),
-                      const SizedBox(height: 8),
-                      const Center(
-                        child: Text('Tap a segment to highlight',
-                          style: TextStyle(color: AppColors.textSecondary, fontSize: 11)),
-                      ),
-                      const SizedBox(height: 24),
-                      _buildLegendSection(debitTotals),
-                    ],
-                    // Deliberately outside the "no spending" branch above: a
-                    // forecast and a budget matter most in a month that has
-                    // not been spent in yet.
-                    const SizedBox(height: 32),
-                    _buildSmartInsightsSection(),
-                    const SizedBox(height: 32),
-                    _buildSectionHeader('Monthly Budgets'),
-                    const SizedBox(height: 16),
-                    _buildBudgetSection(),
-                    const SizedBox(height: 48),
-                  ],
-                ),
-              );
-            },
-          );
+      body: RefreshIndicator(
+        onRefresh: () async {
+          await _loadMonths();
+          _reload();
+          // The FutureBuilder renders the failure; swallowing it here only
+          // stops the refresh gesture itself from throwing.
+          try {
+            await _snapshot;
+          } catch (_) {}
         },
+        color: AppColors.accent,
+        backgroundColor: AppColors.surface,
+        child: FutureBuilder<AnalyticsSnapshot>(
+          future: _snapshot,
+          builder: (context, snap) {
+            return ListView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 48),
+              children: [
+                _monthFilter(),
+                const SizedBox(height: 20),
+                if (snap.hasError)
+                  _errorCard(snap.error!)
+                else if (!snap.hasData)
+                  const _AnalyticsSkeleton()
+                else
+                  ..._sections(snap.data!),
+              ],
+            );
+          },
+        ),
       ),
     );
   }
 
-  Widget _buildMonthFilter(List<String> months) {
+  List<Widget> _sections(AnalyticsSnapshot s) {
+    return [
+      _ThisMonthCard(snapshot: s),
+      const SizedBox(height: 12),
+      _AlertCard(
+        alert: s.alert,
+        onTap: () {
+          final category = s.alert.category;
+          if (category != null) {
+            _openCategory(category);
+          } else if (!s.hasBudgets) {
+            _showBudgetDialog();
+          } else if (s.unassignedPaise > 0) {
+            _viewTransactions(person: 'Unassigned');
+          }
+        },
+      ),
+      const SizedBox(height: 32),
+      _sectionHeader('Where it went'),
+      const SizedBox(height: 12),
+      _categorySection(s),
+      const SizedBox(height: 32),
+      _sectionHeader('Who spent it'),
+      const SizedBox(height: 16),
+      _peopleSection(s),
+      const SizedBox(height: 32),
+      _sectionHeader('Trend'),
+      const SizedBox(height: 16),
+      _card(child: TrendChart(points: s.trend, onMonthTap: _selectMonth)),
+    ];
+  }
+
+  // ── Filter ──────────────────────────────────────────────────────────────────
+
+  Widget _monthFilter() {
+    final months = _months.isEmpty ? [_ym] : _months;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
       decoration: BoxDecoration(
         color: AppColors.surface,
         borderRadius: BorderRadius.circular(16),
@@ -126,29 +198,28 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
       ),
       child: Row(
         children: [
-          const Icon(Icons.calendar_today_rounded, color: AppColors.accent, size: 20),
+          const Icon(Icons.calendar_today_rounded,
+              color: AppColors.accent, size: 18),
           const SizedBox(width: 12),
-          const Text('Report for:', style: TextStyle(color: AppColors.textSecondary, fontSize: 14)),
+          const Text('Showing',
+              style: TextStyle(color: AppColors.textSecondary, fontSize: 13)),
           const Spacer(),
           DropdownButtonHideUnderline(
             child: DropdownButton<String>(
-              value: months.contains(_selectedMonth) ? _selectedMonth : months.first,
+              value: months.contains(_ym) ? _ym : months.first,
               dropdownColor: AppColors.surface,
               icon: const Icon(Icons.arrow_drop_down, color: AppColors.accent),
-              style: const TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.bold, fontSize: 15),
-              items: months.map((String value) {
-                return DropdownMenuItem<String>(
-                  value: value,
-                  child: Text(value),
-                );
-              }).toList(),
-              onChanged: (newValue) {
-                if (newValue != null) {
-                  setState(() {
-                    _selectedMonth = newValue;
-                  });
-                }
-              },
+              style: const TextStyle(
+                  color: AppColors.textPrimary,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 15),
+              items: [
+                for (final m in months)
+                  DropdownMenuItem(
+                      value: m,
+                      child: Text(AnalyticsRepository.shortLabelOf(m))),
+              ],
+              onChanged: (v) => v == null ? null : _selectMonth(v),
             ),
           ),
         ],
@@ -156,44 +227,318 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
     );
   }
 
-  Map<String, double> _calculateDebitTotals(List<TransactionModel> transactions) {
-    final totals = <String, double>{
-      'Me': 0.0,
-      'Mom': 0.0,
-      'Dad': 0.0,
-    };
+  // ── Categories ──────────────────────────────────────────────────────────────
 
-    for (final txn in transactions) {
-      if (txn.type == 'debit' && totals.containsKey(txn.assignedTo)) {
-        totals[txn.assignedTo] = totals[txn.assignedTo]! + txn.amount;
-      }
+  Widget _categorySection(AnalyticsSnapshot s) {
+    if (s.categories.isEmpty) {
+      return _emptyCard(
+        icon: Icons.receipt_long_outlined,
+        title: 'No spending in $_monthLabel',
+        body: 'Add transactions, or pick a different month above.',
+      );
     }
-    return totals;
-  }
 
-  Widget _buildEmptyState() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 48),
-      child: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
+    final visible = _showAllCategories
+        ? s.categories
+        : s.categories.take(_topCategoryCount).toList();
+    final hidden = s.categories.length - visible.length;
+
+    return Column(
+      children: [
+        for (final c in visible) ...[
+          _CategoryRowTile(
+            row: c,
+            onTap: () => _openCategory(c.category),
+            onSetBudget: () => _showBudgetDialog(category: c.category),
+          ),
+          const SizedBox(height: 10),
+        ],
+        Row(
           children: [
-            Icon(Icons.pie_chart_outline, color: AppColors.textSecondary.withOpacity(0.4), size: 64),
-            const SizedBox(height: 16),
-            Text('No spending data for $_selectedMonth',
-              style: const TextStyle(color: AppColors.textSecondary, fontSize: 16, fontWeight: FontWeight.w600)),
-            const SizedBox(height: 8),
-            const Text('Add transactions or select a different month',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: AppColors.textSecondary, fontSize: 13)),
+            if (hidden > 0)
+              TextButton(
+                onPressed: () => setState(() => _showAllCategories = true),
+                child: Text('Show all ${s.categories.length}',
+                    style: const TextStyle(color: AppColors.accent)),
+              )
+            else if (_showAllCategories && s.categories.length > _topCategoryCount)
+              TextButton(
+                onPressed: () => setState(() => _showAllCategories = false),
+                child: const Text('Show less',
+                    style: TextStyle(color: AppColors.accent)),
+              ),
+            const Spacer(),
+            TextButton.icon(
+              onPressed: () => _showBudgetDialog(),
+              icon: const Icon(Icons.add, size: 16, color: AppColors.accent),
+              label: const Text('Add budget',
+                  style: TextStyle(color: AppColors.accent)),
+            ),
           ],
         ),
+      ],
+    );
+  }
+
+  // ── People ──────────────────────────────────────────────────────────────────
+
+  Widget _peopleSection(AnalyticsSnapshot s) {
+    if (s.people.isEmpty || s.spentPaise == 0) {
+      return _emptyCard(
+        icon: Icons.people_outline,
+        title: 'Nothing to split yet',
+        body: 'Once there is spending in $_monthLabel it breaks down here.',
+      );
+    }
+
+    return _card(
+      child: Column(
+        children: [
+          for (var i = 0; i < s.people.length; i++) ...[
+            _PersonRowTile(
+              person: s.people[i],
+              previousMonthName: s.previousMonthName,
+              onTagUnassigned: s.people[i].name == 'Unassigned'
+                  ? () => _viewTransactions(person: 'Unassigned')
+                  : null,
+            ),
+            if (i != s.people.length - 1) const SizedBox(height: 18),
+          ],
+        ],
       ),
     );
   }
 
-  Widget _buildInsightCard(double total) {
-    final currencyFormat = NumberFormat.currency(symbol: '₹', decimalDigits: 0);
+  // ── Chrome ──────────────────────────────────────────────────────────────────
+
+  Widget _sectionHeader(String title) => Text(
+        title.toUpperCase(),
+        style: const TextStyle(
+          color: AppColors.textSecondary,
+          fontSize: 11,
+          fontWeight: FontWeight.bold,
+          letterSpacing: 1.2,
+        ),
+      );
+
+  Widget _card({required Widget child}) => Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.white.withOpacity(0.05)),
+        ),
+        child: child,
+      );
+
+  Widget _emptyCard(
+          {required IconData icon,
+          required String title,
+          required String body}) =>
+      _card(
+        child: Column(
+          children: [
+            Icon(icon, color: AppColors.textSecondary.withOpacity(0.5), size: 36),
+            const SizedBox(height: 12),
+            Text(title,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 15)),
+            const SizedBox(height: 6),
+            Text(body,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                    color: AppColors.textSecondary, fontSize: 13)),
+          ],
+        ),
+      );
+
+  /// A failed query used to render as a missing card, which on a spending
+  /// screen reads as "₹0" — the worst way for this app to fail. It says so
+  /// now, and offers the retry.
+  Widget _errorCard(Object error) => Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: AppColors.debit.withOpacity(0.35)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.error_outline,
+                    color: AppColors.debit, size: 20),
+                const SizedBox(width: 10),
+                const Text("Couldn't load your analytics",
+                    style: TextStyle(
+                        color: AppColors.debit,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14)),
+              ],
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'These figures are unavailable right now — nothing is missing '
+              'from your transactions.',
+              style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
+            ),
+            const SizedBox(height: 4),
+            Text('$error',
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    color: AppColors.textSecondary.withOpacity(0.7),
+                    fontSize: 11)),
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
+                onPressed: _reload,
+                icon: const Icon(Icons.refresh, size: 16, color: AppColors.accent),
+                label: const Text('Try again',
+                    style: TextStyle(color: AppColors.accent)),
+              ),
+            ),
+          ],
+        ),
+      );
+
+  // ── Budgets ─────────────────────────────────────────────────────────────────
+
+  /// Budgets are edited where they are read — from a category row or the
+  /// category sheet — rather than from a carousel of their own at the bottom
+  /// of the screen.
+  void _showBudgetDialog({String? category}) {
+    final amountController = TextEditingController();
+    String selected = category ?? TransactionModel.availableCategories.first;
+    int? suggestion;
+    String? loadedFor;
+
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          if (loadedFor != selected) {
+            loadedFor = selected;
+            _repo.suggestedBudgetPaise(selected).then((value) {
+              if (value == null || value <= 0 || !ctx.mounted) return;
+              setDialogState(() {
+                suggestion = value;
+                if (amountController.text.isEmpty) {
+                  amountController.text =
+                      Money.toDouble(value).toStringAsFixed(0);
+                }
+              });
+            });
+          }
+
+          return AlertDialog(
+            backgroundColor: AppColors.surface,
+            title: Text(
+              category == null ? 'Set a budget' : '$category budget',
+              style: const TextStyle(color: AppColors.textPrimary),
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (category == null)
+                  DropdownButtonFormField<String>(
+                    value: selected,
+                    dropdownColor: AppColors.surface,
+                    style: const TextStyle(color: AppColors.textPrimary),
+                    decoration: const InputDecoration(
+                      labelText: 'Category',
+                      labelStyle: TextStyle(color: AppColors.textSecondary),
+                    ),
+                    items: [
+                      for (final c in TransactionModel.availableCategories)
+                        DropdownMenuItem(value: c, child: Text(c)),
+                    ],
+                    onChanged: (v) {
+                      if (v == null) return;
+                      amountController.clear();
+                      setDialogState(() {
+                        selected = v;
+                        suggestion = null;
+                      });
+                    },
+                  ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: amountController,
+                  keyboardType: TextInputType.number,
+                  autofocus: category != null,
+                  style: const TextStyle(color: AppColors.textPrimary),
+                  decoration: InputDecoration(
+                    labelText: 'Monthly limit (₹)',
+                    labelStyle:
+                        const TextStyle(color: AppColors.textSecondary),
+                    helperText: suggestion == null
+                        ? null
+                        : 'Typically ${formatPaise(suggestion!)} a month',
+                    helperStyle:
+                        const TextStyle(color: AppColors.accent, fontSize: 11),
+                    enabledBorder: const UnderlineInputBorder(
+                        borderSide: BorderSide(color: AppColors.accent)),
+                    focusedBorder: const UnderlineInputBorder(
+                        borderSide:
+                            BorderSide(color: AppColors.accent, width: 2)),
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              if (category != null)
+                TextButton(
+                  onPressed: () async {
+                    await _repo.deleteBudget(category);
+                    if (ctx.mounted) Navigator.pop(ctx);
+                  },
+                  child: const Text('Remove',
+                      style: TextStyle(color: AppColors.debit)),
+                ),
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cancel',
+                      style: TextStyle(color: AppColors.textSecondary))),
+              ElevatedButton(
+                onPressed: () async {
+                  final rupees = double.tryParse(amountController.text.trim());
+                  if (rupees == null || rupees <= 0) return;
+                  await _repo.saveBudget(selected, Money.fromDouble(rupees));
+                  if (ctx.mounted) Navigator.pop(ctx);
+                },
+                style:
+                    ElevatedButton.styleFrom(backgroundColor: AppColors.accent),
+                child: const Text('Save',
+                    style: TextStyle(color: Colors.white)),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+// ── This month ────────────────────────────────────────────────────────────────
+
+class _ThisMonthCard extends StatelessWidget {
+  const _ThisMonthCard({required this.snapshot});
+
+  final AnalyticsSnapshot snapshot;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = snapshot;
+    final overBudget = s.hasBudgets && s.headroomPaise < 0;
+
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(24),
@@ -205,717 +550,509 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Total Family Spending', 
-            style: TextStyle(color: AppColors.textSecondary, fontSize: 14)),
-          const SizedBox(height: 8),
-          Text(currencyFormat.format(total),
-            style: const TextStyle(
-              color: AppColors.textPrimary, 
-              fontSize: 32, 
-              fontWeight: FontWeight.bold
-            )),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildChartSection(Map<String, double> totals) {
-    return AspectRatio(
-      aspectRatio: 1.3,
-      child: PieChart(
-        PieChartData(
-          pieTouchData: PieTouchData(
-            touchCallback: (FlTouchEvent event, pieTouchResponse) {
-              setState(() {
-                if (!event.isInterestedForInteractions ||
-                    pieTouchResponse == null ||
-                    pieTouchResponse.touchedSection == null) {
-                  touchedIndex = -1;
-                  return;
-                }
-                touchedIndex = pieTouchResponse.touchedSection!.touchedSectionIndex;
-              });
-            },
-          ),
-          borderData: FlBorderData(show: false),
-          sectionsSpace: 4,
-          centerSpaceRadius: 50,
-          sections: _getSections(totals),
-        ),
-      ),
-    );
-  }
-
-  List<PieChartSectionData> _getSections(Map<String, double> totals) {
-    final list = <PieChartSectionData>[];
-    int i = 0;
-    
-    totals.forEach((person, amount) {
-      if (amount > 0) {
-        final isTouched = i == touchedIndex;
-        final fontSize = isTouched ? 20.0 : 16.0;
-        final radius = isTouched ? 65.0 : 55.0;
-        final opacity = isTouched ? 1.0 : 0.85;
-
-        list.add(
-          PieChartSectionData(
-            color: _getColorForPerson(person).withOpacity(opacity),
-            value: amount,
-            title: '${((amount / totals.values.fold(0.0, (sum, val) => sum + val)) * 100).toStringAsFixed(0)}%',
-            radius: radius,
-            titleStyle: TextStyle(
-              fontSize: fontSize,
-              fontWeight: FontWeight.bold,
-              color: AppColors.textPrimary,
-            ),
-          ),
-        );
-        i++;
-      }
-    });
-    return list;
-  }
-
-  Widget _buildLegendSection(Map<String, double> totals) {
-    final currencyFormat = NumberFormat.currency(symbol: '₹', decimalDigits: 0);
-
-    return Column(
-      children: totals.entries.map((entry) {
-        return Padding(
-          padding: const EdgeInsets.only(bottom: 16.0),
-          child: Row(
+          Row(
             children: [
-              Container(
-                width: 16,
-                height: 16,
-                decoration: BoxDecoration(
-                  color: _getColorForPerson(entry.key),
-                  shape: BoxShape.circle,
-                ),
+              Text(
+                s.isCurrentMonth
+                    ? 'SPENT THIS MONTH'
+                    : 'SPENT IN ${AnalyticsRepository.monthNameOf(s.ym).toUpperCase()}',
+                style: const TextStyle(
+                    color: AppColors.textSecondary,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1.2),
+              ),
+              const Spacer(),
+              if (s.isCurrentMonth)
+                Text('Day ${s.daysElapsed} of ${s.daysInMonth}',
+                    style: const TextStyle(
+                        color: AppColors.textSecondary, fontSize: 11)),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(
+                formatPaise(s.spentPaise),
+                style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 34,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: -1.2),
               ),
               const SizedBox(width: 12),
-              Text(entry.key, 
-                style: const TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.bold)),
-              const Spacer(),
-              Text(currencyFormat.format(entry.value), 
-                style: const TextStyle(color: AppColors.textSecondary)),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: _DeltaLabel(
+                  deltaPaise: s.deltaPaise,
+                  hasBaseline: s.previousComparablePaise > 0,
+                  suffix: 'vs ${s.previousMonthName}',
+                ),
+              ),
             ],
           ),
-        );
-      }).toList(),
-    );
-  }
+          const SizedBox(height: 20),
 
-  Color _getColorForPerson(String person) {
-    switch (person) {
-      case 'Me': return AppColors.memberMe;
-      case 'Mom': return AppColors.memberMom;
-      case 'Dad': return AppColors.memberDad;
-      default: return AppColors.textSecondary;
-    }
-  }
-
-
-
-  Widget _buildTrendsButton() {
-    return Container(
-      width: double.infinity,
-      height: 100,
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [AppColors.accent, Color(0xFF6366F1)], // Indigo-Violet gradient
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(24),
-        boxShadow: [
-          BoxShadow(
-            color: AppColors.accent.withOpacity(0.3),
-            blurRadius: 15,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onHighlightChanged: (v) {},
-          borderRadius: BorderRadius.circular(24),
-          onTap: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(builder: (context) => const CategoryInsightsScreen()),
-            );
-          },
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.2),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(Icons.auto_graph_rounded, color: Colors.white, size: 28),
-                ),
-                const SizedBox(width: 20),
-                Expanded(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: const [
-                      Text('View Detailed Category Trends', 
-                        style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
-                        overflow: TextOverflow.ellipsis),
-                      SizedBox(height: 4),
-                      Text('Analyze peak months & averages', 
-                        style: TextStyle(color: Colors.white70, fontSize: 13),
-                        overflow: TextOverflow.ellipsis),
-                    ],
-                  ),
-                ),
-                const Spacer(),
-                const Icon(Icons.chevron_right_rounded, color: Colors.white70),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildYearlyTrendSection() {
-    return StreamBuilder<Map<String, double>>(
-      stream: _yearlyTrendStream,
-      builder: (context, snapshot) {
-        if (!snapshot.hasData) return const SizedBox(
-          height: 200,
-          child: Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                CircularProgressIndicator(color: AppColors.accent),
-                SizedBox(height: 12),
-                Text('Loading spending trend...', style: TextStyle(color: AppColors.textSecondary, fontSize: 13)),
-              ],
-            ),
-          ),
-        );
-        
-        final trend = snapshot.data!;
-        final maxVal = trend.values.fold(0.0, (m, v) => v > m ? v : m);
-        final maxY = maxVal > 0 ? maxVal * 1.2 : 1000.0;
-
-        return Container(
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            color: AppColors.surface,
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: Colors.white.withOpacity(0.05)),
-          ),
-          child: Column(
+          // The two supporting KPIs. Everything else that used to sit up here
+          // was context, not a decision.
+          Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('Spending Trend (12 Months)', 
-                style: TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.bold, fontSize: 18)),
-              const SizedBox(height: 32),
-              AspectRatio(
-                aspectRatio: 1.7,
-                child: LineChart(
-                  LineChartData(
-                    gridData: FlGridData(show: false),
-                    titlesData: FlTitlesData(
-                      leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                      rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                      topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                      bottomTitles: AxisTitles(
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          interval: 2,
-                          getTitlesWidget: (value, meta) {
-                            int idx = value.toInt();
-                            if (idx < 0 || idx >= trend.length) return const SizedBox();
-                            return Padding(
-                              padding: const EdgeInsets.only(top: 8.0),
-                              child: Text(trend.keys.elementAt(idx), 
-                                style: const TextStyle(color: AppColors.textSecondary, fontSize: 10)),
-                            );
-                          },
-                        ),
-                      ),
-                    ),
-                    borderData: FlBorderData(show: false),
-                    minX: 0,
-                    maxX: 11,
-                    minY: 0,
-                    maxY: maxY,
-                    lineBarsData: [
-                      LineChartBarData(
-                        spots: trend.values.toList().asMap().entries.map((e) => FlSpot(e.key.toDouble(), e.value)).toList(),
-                        isCurved: true,
-                        color: AppColors.accent,
-                        barWidth: 4,
-                        isStrokeCapRound: true,
-                        dotData: FlDotData(show: false),
-                        belowBarData: BarAreaData(
-                          show: true,
-                          color: AppColors.accent.withOpacity(0.1),
-                        ),
-                      ),
-                    ],
-                  ),
+              Expanded(
+                child: _Kpi(
+                  label: s.isCurrentMonth
+                      ? 'Projected by ${s.daysInMonth} '
+                          '${AnalyticsRepository.monthNameOf(s.ym).substring(0, 3)}'
+                      : 'Final total',
+                  value: formatPaise(s.forecastPaise),
+                  emphasis: s.projectedOverBudget
+                      ? AppColors.debit
+                      : AppColors.textPrimary,
+                ),
+              ),
+              Expanded(
+                child: _Kpi(
+                  label: !s.hasBudgets
+                      ? 'Budget'
+                      : (overBudget ? 'Over budget' : 'Left to spend'),
+                  value: !s.hasBudgets
+                      ? 'Not set'
+                      : formatPaise(s.headroomPaise.abs()),
+                  emphasis: !s.hasBudgets
+                      ? AppColors.textSecondary
+                      : (overBudget ? AppColors.debit : AppColors.credit),
+                  sub: s.hasBudgets
+                      ? 'of ${formatPaise(s.totalBudgetPaise)}'
+                      : null,
                 ),
               ),
             ],
           ),
-        );
-      }
-    );
-  }
 
-  // ── Smart Insights ──────────────────────────────────────────────────────────
-  // Moved here from the dashboard, which had grown into a second analytics
-  // screen. Unchanged in behaviour — same streams, same queries.
-
-  Widget _buildSectionHeader(String title) {
-    return Row(
-      children: [
-        Text(title,
-          style: const TextStyle(
-            color: AppColors.textPrimary,
-            fontSize: 18,
-            fontWeight: FontWeight.bold
-          )),
-      ],
-    );
-  }
-
-  Widget _buildSmartInsightsSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _buildSectionHeader('Smart Insights'),
-        const SizedBox(height: 16),
-        _buildForecastCard(),
-        const SizedBox(height: 12),
-        _buildAnomaliesCard(),
-      ],
-    );
-  }
-
-  Widget _buildForecastCard() {
-    return StreamBuilder<Map<String, dynamic>>(
-      stream: _forecastStream,
-      builder: (context, snapshot) {
-        if (!snapshot.hasData) return const SizedBox.shrink();
-        final data = snapshot.data!;
-        final current = data['currentSpend'] as double;
-        final forecast = data['forecastedSpend'] as double;
-        final daysElapsed = data['daysElapsed'] as int;
-        final totalDays = data['totalDays'] as int;
-        final totalBudget = data['totalBudget'] as double;
-        final currencyFormat = NumberFormat.currency(symbol: '₹', decimalDigits: 0);
-
-        if (forecast == 0) return const SizedBox.shrink();
-
-        final hasBudget = totalBudget > 0;
-        final isOver = hasBudget && forecast > totalBudget;
-        final progress = hasBudget ? (forecast / totalBudget).clamp(0.0, 1.0) : null;
-        final accentColor = isOver ? AppColors.debit : AppColors.accent;
-
-        return Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(
-            color: AppColors.surface,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: accentColor.withOpacity(0.25)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Icon(isOver ? Icons.trending_up_rounded : Icons.insights_rounded,
-                      color: accentColor, size: 20),
-                  const SizedBox(width: 10),
-                  Text('Month-End Forecast',
-                      style: TextStyle(
-                          color: accentColor, fontWeight: FontWeight.bold, fontSize: 14)),
-                  const Spacer(),
-                  Text('Day $daysElapsed / $totalDays',
-                      style: const TextStyle(color: AppColors.textSecondary, fontSize: 11)),
-                ],
-              ),
-              const SizedBox(height: 16),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(currencyFormat.format(forecast),
-                      style: TextStyle(
-                          color: accentColor,
-                          fontSize: 28,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: -1)),
-                  const SizedBox(width: 8),
-                  const Padding(
-                    padding: EdgeInsets.only(bottom: 4),
-                    child: Text('projected',
-                        style: TextStyle(
-                            color: AppColors.textSecondary, fontSize: 12)),
-                  ),
-                  if (hasBudget) ...[
-                    const Spacer(),
-                    Text(
-                      '/ ${currencyFormat.format(totalBudget)} budget',
-                      style: TextStyle(
-                          color: isOver ? AppColors.debit : AppColors.textSecondary,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600),
-                    ),
-                  ],
-                ],
-              ),
-              const SizedBox(height: 4),
-              Text(
-                '${currencyFormat.format(current)} spent so far',
-                style: const TextStyle(color: AppColors.textSecondary, fontSize: 12),
-              ),
-              if (progress != null) ...[
-                const SizedBox(height: 12),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
-                  child: LinearProgressIndicator(
-                    value: progress,
-                    backgroundColor: Colors.white.withOpacity(0.05),
-                    color: accentColor,
-                    minHeight: 5,
-                  ),
-                ),
-                if (isOver)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: Text(
-                      '⚠ Projected to exceed budget by ${currencyFormat.format(forecast - totalBudget)}',
-                      style: const TextStyle(color: AppColors.debit, fontSize: 11),
-                    ),
-                  ),
-              ],
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildAnomaliesCard() {
-    return StreamBuilder<List<Map<String, dynamic>>>(
-      stream: _anomaliesStream,
-      builder: (context, snapshot) {
-        final anomalies = snapshot.data ?? [];
-        if (anomalies.isEmpty) return const SizedBox.shrink();
-
-        final currencyFormat = NumberFormat.currency(symbol: '₹', decimalDigits: 0);
-
-        return Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(
-            color: AppColors.surface,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: Colors.amber.withOpacity(0.25)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  const Icon(Icons.warning_amber_rounded, color: Colors.amber, size: 20),
-                  const SizedBox(width: 10),
-                  const Text('Spending Spikes',
-                      style: TextStyle(
-                          color: Colors.amber,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14)),
-                  const Spacer(),
-                  Text('vs 3-month avg',
-                      style: TextStyle(
-                          color: AppColors.textSecondary.withOpacity(0.6), fontSize: 11)),
-                ],
-              ),
-              const SizedBox(height: 16),
-              ...anomalies.take(3).map((a) {
-                final cat = a['category'] as String;
-                final current = a['currentAmount'] as double;
-                final avg = a['avgAmount'] as double;
-                final ratio = a['ratio'] as double;
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(cat,
-                                style: const TextStyle(
-                                    color: AppColors.textPrimary,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 14)),
-                            const SizedBox(height: 2),
-                            Text(
-                              '${currencyFormat.format(current)} this month  •  avg ${currencyFormat.format(avg)}',
-                              style: const TextStyle(
-                                  color: AppColors.textSecondary, fontSize: 11),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: AppColors.debit.withOpacity(0.12),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          '↑ ${ratio.toStringAsFixed(1)}×',
-                          style: const TextStyle(
-                              color: AppColors.debit,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 13),
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              }),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  // ── Budgets ─────────────────────────────────────────────────────────────────
-
-  Widget _buildBudgetSection() {
-    return StreamBuilder<List<Map<String, dynamic>>>(
-      stream: _budgetProgressStream,
-      builder: (context, snapshot) {
-        if (!snapshot.hasData || (snapshot.data?.isEmpty ?? true)) {
-          return Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: AppColors.surface,
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Row(
-              children: [
-                const Icon(Icons.info_outline, color: AppColors.textSecondary, size: 20),
-                const SizedBox(width: 12),
-                const Expanded(
-                  child: Text('No budgets set. Click here to start budgeting!',
-                    style: TextStyle(color: AppColors.textSecondary, fontSize: 13)),
-                ),
-                TextButton(
-                  onPressed: () => _showSetBudgetDialog(context),
-                  child: const Text('Add', style: TextStyle(color: AppColors.accent)),
-                )
-              ],
-            ),
-          );
-        }
-
-        final budgets = snapshot.data!;
-        return SizedBox(
-          height: 110,
-          child: ListView.builder(
-            scrollDirection: Axis.horizontal,
-            physics: const BouncingScrollPhysics(),
-            itemCount: budgets.length + 1,
-            itemBuilder: (context, index) {
-              if (index == budgets.length) {
-                return _buildAddBudgetCard();
-              }
-              final budget = budgets[index];
-              return _buildBudgetCard(budget);
-            },
-          ),
-        );
-      }
-    );
-  }
-
-  Widget _buildBudgetCard(Map<String, dynamic> budget) {
-    final spent = budget['spent'] as double;
-    final limit = budget['limit'] as double;
-    final category = budget['category'] as String;
-    final percent = (spent / limit).clamp(0.0, 1.0);
-    final isOver = spent > limit;
-
-    return Container(
-      width: 180,
-      margin: const EdgeInsets.only(right: 16),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: isOver ? Colors.red.withOpacity(0.3) : Colors.white.withOpacity(0.05)),
-      ),
-      child: InkWell(
-        onTap: () => _showSetBudgetDialog(context, category: category, currentAmount: limit),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Expanded(
-                  child: Text(category,
-                    maxLines: 1, overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.bold, fontSize: 13)),
-                ),
-                Text('${(percent * 100).toStringAsFixed(0)}%',
-                  style: TextStyle(color: isOver ? Colors.red : AppColors.textSecondary, fontSize: 10, fontWeight: FontWeight.bold)),
-              ],
-            ),
-            const Spacer(),
-            Row(
-              children: [
-                Text('₹${spent.toStringAsFixed(0)}', style: const TextStyle(color: AppColors.textPrimary, fontSize: 14, fontWeight: FontWeight.bold)),
-                Text(' / ₹${limit.toStringAsFixed(0)}', style: const TextStyle(color: AppColors.textSecondary, fontSize: 10)),
-              ],
-            ),
-            const SizedBox(height: 8),
+          if (s.hasBudgets) ...[
+            const SizedBox(height: 16),
             ClipRRect(
               borderRadius: BorderRadius.circular(4),
               child: LinearProgressIndicator(
-                value: percent,
+                value: s.budgetProgress,
                 backgroundColor: Colors.white.withOpacity(0.05),
-                color: isOver ? Colors.red : AppColors.accent,
-                minHeight: 4,
+                color: overBudget ? AppColors.debit : AppColors.accent,
+                minHeight: 6,
               ),
             ),
+            const SizedBox(height: 8),
+            Text(
+              '${(s.budgetProgress * 100).round()}% of '
+              '${formatPaise(s.totalBudgetPaise)} budgeted',
+              style: const TextStyle(
+                  color: AppColors.textSecondary, fontSize: 11),
+            ),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+class _Kpi extends StatelessWidget {
+  const _Kpi({
+    required this.label,
+    required this.value,
+    required this.emphasis,
+    this.sub,
+  });
+
+  final String label;
+  final String value;
+  final Color emphasis;
+  final String? sub;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+                color: AppColors.textSecondary, fontSize: 11)),
+        const SizedBox(height: 4),
+        FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: Text(value,
+              style: TextStyle(
+                  color: emphasis,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold)),
+        ),
+        if (sub != null)
+          Text(sub!,
+              style: const TextStyle(
+                  color: AppColors.textSecondary, fontSize: 10)),
+      ],
+    );
+  }
+}
+
+/// More spending than the comparison period is red, less is green. On a
+/// spending screen "up" is not good news, and the colour should not have to be
+/// re-learned per card.
+class _DeltaLabel extends StatelessWidget {
+  const _DeltaLabel({
+    required this.deltaPaise,
+    required this.hasBaseline,
+    required this.suffix,
+  });
+
+  final int deltaPaise;
+  final bool hasBaseline;
+  final String suffix;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!hasBaseline) {
+      return Text('no $suffix to compare',
+          style: const TextStyle(color: AppColors.textSecondary, fontSize: 12));
+    }
+    if (deltaPaise == 0) {
+      return Text('same as $suffix',
+          style: const TextStyle(color: AppColors.textSecondary, fontSize: 12));
+    }
+    final up = deltaPaise > 0;
+    return Text(
+      '${up ? '↑' : '↓'} ${formatPaise(deltaPaise.abs())} $suffix',
+      style: TextStyle(
+        color: up ? AppColors.debit : AppColors.credit,
+        fontSize: 12,
+        fontWeight: FontWeight.w600,
+      ),
+    );
+  }
+}
+
+// ── Alert ─────────────────────────────────────────────────────────────────────
+
+/// One alert, not a stack of them. The forecast warning and up to three spike
+/// rows used to compete for the same attention, which left the reader to work
+/// out which mattered — the job the alert exists to do.
+class _AlertCard extends StatelessWidget {
+  const _AlertCard({required this.alert, required this.onTap});
+
+  final AnalyticsAlert alert;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final (color, icon) = switch (alert.severity) {
+      AlertSeverity.critical => (AppColors.debit, Icons.error_outline_rounded),
+      AlertSeverity.warning => (Colors.amber, Icons.warning_amber_rounded),
+      AlertSeverity.prompt => (AppColors.accent, Icons.lightbulb_outline),
+      AlertSeverity.ok => (AppColors.credit, Icons.check_circle_outline),
+    };
+
+    final actionable = alert.severity != AlertSeverity.ok;
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: actionable ? onTap : null,
+        borderRadius: BorderRadius.circular(20),
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: color.withOpacity(0.3)),
+          ),
+          child: Row(
+            children: [
+              Icon(icon, color: color, size: 20),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  alert.message,
+                  style: const TextStyle(
+                      color: AppColors.textPrimary,
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w600,
+                      height: 1.35),
+                ),
+              ),
+              if (actionable) ...[
+                const SizedBox(width: 8),
+                Icon(Icons.chevron_right_rounded,
+                    color: color.withOpacity(0.8), size: 20),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Category row ──────────────────────────────────────────────────────────────
+
+class _CategoryRowTile extends StatelessWidget {
+  const _CategoryRowTile({
+    required this.row,
+    required this.onTap,
+    required this.onSetBudget,
+  });
+
+  final CategoryRow row;
+  final VoidCallback onTap;
+  final VoidCallback onSetBudget;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(16, 14, 12, 14),
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: row.isOverBudget
+                  ? AppColors.debit.withOpacity(0.3)
+                  : Colors.white.withOpacity(0.05),
+            ),
+          ),
+          child: Column(
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(row.category,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: AppColors.textPrimary,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14)),
+                  ),
+                  Text(formatPaise(row.spentPaise),
+                      style: const TextStyle(
+                          color: AppColors.textPrimary,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14)),
+                  const SizedBox(width: 10),
+                  SizedBox(
+                    width: 36,
+                    child: Text('${(row.share * 100).round()}%',
+                        textAlign: TextAlign.right,
+                        style: const TextStyle(
+                            color: AppColors.textSecondary, fontSize: 12)),
+                  ),
+                  const Icon(Icons.chevron_right_rounded,
+                      color: AppColors.textSecondary, size: 18),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: row.hasBudget
+                        ? ClipRRect(
+                            borderRadius: BorderRadius.circular(4),
+                            child: LinearProgressIndicator(
+                              value: row.budgetProgress,
+                              backgroundColor: Colors.white.withOpacity(0.05),
+                              color: row.isOverBudget
+                                  ? AppColors.debit
+                                  : AppColors.accent,
+                              minHeight: 4,
+                            ),
+                          )
+                        : const SizedBox(height: 4),
+                  ),
+                  const SizedBox(width: 12),
+                  if (row.hasComparison) _comparison(),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      row.hasBudget
+                          ? '${(row.spentPaise / row.budgetPaise! * 100).round()}% '
+                              'of ${formatPaise(row.budgetPaise!)}'
+                          : 'No budget set',
+                      style: TextStyle(
+                        color: row.isOverBudget
+                            ? AppColors.debit
+                            : AppColors.textSecondary,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                  if (!row.hasBudget)
+                    GestureDetector(
+                      onTap: onSetBudget,
+                      behavior: HitTestBehavior.opaque,
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 4),
+                        child: Text('Set',
+                            style: TextStyle(
+                                color: AppColors.accent,
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold)),
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 
-  Widget _buildAddBudgetCard() {
-    return Container(
-      width: 60,
-      margin: const EdgeInsets.only(right: 16),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white.withOpacity(0.05), style: BorderStyle.solid),
-      ),
-      child: IconButton(
-        onPressed: () => _showSetBudgetDialog(context),
-        icon: const Icon(Icons.add, color: AppColors.textSecondary),
-      ),
-    );
-  }
-
-  void _showSetBudgetDialog(BuildContext context, {String? category, double? currentAmount}) {
-    final amountController = TextEditingController(text: currentAmount?.toStringAsFixed(0) ?? '');
-    String selectedCategory = category ?? TransactionModel.availableCategories.first;
-    String? suggestionText;
-    bool loadingStarted = false;
-
-    Future<void> loadSuggestion(String cat, Function setDialogState) async {
-      final avg = await _localDbService.getCategoryAverage(cat);
-      if (avg > 0) {
-        setDialogState(() {
-          suggestionText = '3-month avg: ₹${avg.toStringAsFixed(0)}';
-          if (amountController.text.isEmpty) {
-            amountController.text = avg.toStringAsFixed(0);
-          }
-        });
-      }
+  Widget _comparison() {
+    final ratio = row.ratio!;
+    if (ratio >= 1.5) {
+      return Text('↑ ${ratio.toStringAsFixed(1)}× usual',
+          style: const TextStyle(
+              color: AppColors.debit,
+              fontSize: 11,
+              fontWeight: FontWeight.bold));
     }
-
-    showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) {
-          if (category == null && suggestionText == null && !loadingStarted) {
-            loadingStarted = true;
-            loadSuggestion(selectedCategory, setDialogState);
-          }
-          return AlertDialog(
-            backgroundColor: AppColors.surface,
-            title: Text(category == null ? 'Set New Budget' : 'Update $category Budget',
-              style: const TextStyle(color: AppColors.textPrimary)),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (category == null)
-                  DropdownButtonFormField<String>(
-                    value: selectedCategory,
-                    dropdownColor: AppColors.surface,
-                    style: const TextStyle(color: AppColors.textPrimary),
-                    decoration: const InputDecoration(
-                      labelText: 'Category',
-                      labelStyle: TextStyle(color: AppColors.textSecondary)),
-                    items: TransactionModel.availableCategories
-                        .map((c) => DropdownMenuItem(value: c, child: Text(c)))
-                        .toList(),
-                    onChanged: (val) {
-                      selectedCategory = val!;
-                      amountController.clear();
-                      loadingStarted = false;
-                      setDialogState(() => suggestionText = null);
-                      loadSuggestion(val, setDialogState);
-                    },
-                  ),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: amountController,
-                  keyboardType: TextInputType.number,
-                  autofocus: category != null,
-                  style: const TextStyle(color: AppColors.textPrimary),
-                  decoration: InputDecoration(
-                    labelText: 'Monthly Limit (₹)',
-                    labelStyle: const TextStyle(color: AppColors.textSecondary),
-                    helperText: suggestionText,
-                    helperStyle: const TextStyle(color: AppColors.accent, fontSize: 11),
-                    enabledBorder: const UnderlineInputBorder(
-                        borderSide: BorderSide(color: AppColors.accent)),
-                    focusedBorder: const UnderlineInputBorder(
-                        borderSide: BorderSide(color: AppColors.accent, width: 2)),
-                  ),
-                ),
-              ],
-            ),
-            actions: [
-              if (category != null)
-                TextButton(
-                  onPressed: () async {
-                    await _localDbService.deleteBudget(category);
-                    if (mounted) Navigator.pop(ctx);
-                  },
-                  child: const Text('Delete', style: TextStyle(color: Colors.red)),
-                ),
-              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-              ElevatedButton(
-                onPressed: () async {
-                  final amount = double.tryParse(amountController.text);
-                  if (amount != null && amount > 0) {
-                    await _localDbService.saveBudget(selectedCategory, amount);
-                    if (mounted) Navigator.pop(ctx);
-                  }
-                },
-                style: ElevatedButton.styleFrom(backgroundColor: AppColors.accent),
-                child: const Text('Save', style: TextStyle(color: Colors.white)),
-              ),
-            ],
-          );
-        },
+    final delta = row.deltaFraction!;
+    if (delta.abs() < 0.05) {
+      return const Text('→ usual',
+          style: TextStyle(color: AppColors.textSecondary, fontSize: 11));
+    }
+    final up = delta > 0;
+    return Text(
+      '${up ? '↑' : '↓'} ${(delta.abs() * 100).round()}%',
+      style: TextStyle(
+        color: up ? AppColors.debit : AppColors.credit,
+        fontSize: 11,
+        fontWeight: FontWeight.w600,
       ),
     );
   }
+}
+
+// ── Person row ────────────────────────────────────────────────────────────────
+
+class _PersonRowTile extends StatelessWidget {
+  const _PersonRowTile({
+    required this.person,
+    required this.previousMonthName,
+    this.onTagUnassigned,
+  });
+
+  final PersonRow person;
+  final String previousMonthName;
+  final VoidCallback? onTagUnassigned;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Row(
+          children: [
+            Text(person.name,
+                style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14)),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _DeltaLabel(
+                deltaPaise: person.deltaPaise,
+                hasBaseline: person.previousPaise > 0,
+                suffix: 'vs $previousMonthName',
+              ),
+            ),
+            Text('${(person.share * 100).round()}%',
+                style: const TextStyle(
+                    color: AppColors.textSecondary, fontSize: 12)),
+            const SizedBox(width: 12),
+            Text(formatPaise(person.spentPaise),
+                style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600)),
+          ],
+        ),
+        const SizedBox(height: 8),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(4),
+          child: LinearProgressIndicator(
+            value: person.share.clamp(0.0, 1.0),
+            backgroundColor: Colors.white.withOpacity(0.05),
+            color: memberColor(person.name),
+            minHeight: 6,
+          ),
+        ),
+        if (onTagUnassigned != null) ...[
+          const SizedBox(height: 6),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(
+              onPressed: onTagUnassigned,
+              style: TextButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+              child: const Text('Tag these →',
+                  style: TextStyle(color: AppColors.accent, fontSize: 12)),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+// ── Skeleton ──────────────────────────────────────────────────────────────────
+
+/// Section-shaped placeholders instead of a full-screen spinner. The old screen
+/// stacked two of those, so changing month blanked the entire tab.
+class _AnalyticsSkeleton extends StatelessWidget {
+  const _AnalyticsSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _block(height: 168, radius: 24),
+        const SizedBox(height: 12),
+        _block(height: 60, radius: 20),
+        const SizedBox(height: 32),
+        _block(height: 12, radius: 4, width: 110),
+        const SizedBox(height: 12),
+        for (var i = 0; i < 3; i++) ...[
+          _block(height: 84, radius: 16),
+          const SizedBox(height: 10),
+        ],
+        const SizedBox(height: 22),
+        _block(height: 12, radius: 4, width: 110),
+        const SizedBox(height: 12),
+        _block(height: 180, radius: 20),
+      ],
+    );
+  }
+
+  Widget _block({required double height, required double radius, double? width}) =>
+      Container(
+        width: width ?? double.infinity,
+        height: height,
+        decoration: BoxDecoration(
+          color: AppColors.surface.withOpacity(0.6),
+          borderRadius: BorderRadius.circular(radius),
+        ),
+      );
 }

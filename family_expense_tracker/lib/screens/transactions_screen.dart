@@ -10,7 +10,18 @@ import 'package:intl/intl.dart';
 
 class TransactionsScreen extends StatefulWidget {
   final String? initialFilter;
-  const TransactionsScreen({super.key, this.initialFilter});
+
+  /// Pre-applied filters, used when Analytics hands off a drill-down. Display
+  /// form (`MMM yyyy`, category name), matching the dropdowns they populate.
+  final String? initialMonth;
+  final String? initialCategory;
+
+  const TransactionsScreen({
+    super.key,
+    this.initialFilter,
+    this.initialMonth,
+    this.initialCategory,
+  });
 
   @override
   State<TransactionsScreen> createState() => _TransactionsScreenState();
@@ -27,8 +38,8 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
   bool _isLoading = true;
 
   final List<String> _filters = ['All', 'Unassigned', 'Me', 'Mom', 'Dad', 'SBI', 'BoB'];
-  String _selectedMonth = 'All Time';
-  String _selectedCategory = 'All Categories';
+  late String _selectedMonth;
+  late String _selectedCategory;
   Set<String> _recurringDescriptions = {};
 
   // Categories are now managed in TransactionModel.availableCategories
@@ -37,6 +48,8 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
   void initState() {
     super.initState();
     _selectedFilter = widget.initialFilter ?? 'All';
+    _selectedMonth = widget.initialMonth ?? 'All Time';
+    _selectedCategory = widget.initialCategory ?? 'All Categories';
     _loadTransactions();
     _loadRecurringPatterns();
     _dbChangeSubscription = _localDbService.onChange.listen((_) {
@@ -159,6 +172,10 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
       return dateB.compareTo(dateA); // Newest first
     });
     months.addAll(sortedMonths);
+    // A month handed in by a deep link may have no rows left under the current
+    // filters. Keep it selectable rather than letting the dropdown assert on a
+    // value that isn't in its own item list.
+    if (!months.contains(_selectedMonth)) months.insert(1, _selectedMonth);
     return months;
   }
 
@@ -232,7 +249,16 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
           Expanded(
             child: _buildDropdown(
               value: _selectedCategory,
-              items: ['All Categories', ...TransactionModel.availableCategories],
+              items: [
+                'All Categories',
+                ...TransactionModel.availableCategories,
+                // Same guard as the month list: a legacy category on an old
+                // transaction must not crash the dropdown it lands in.
+                if (_selectedCategory != 'All Categories' &&
+                    !TransactionModel.availableCategories
+                        .contains(_selectedCategory))
+                  _selectedCategory,
+              ],
               onChanged: (val) {
                 setState(() {
                   _selectedCategory = val!;
